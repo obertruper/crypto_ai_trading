@@ -1,0 +1,251 @@
+# Основная конфигурация проекта AI торговой системы
+
+# Подключение к базе данных (адаптировано под вашу БД)
+database:
+  host: "localhost"
+  port: 5555
+  database: "crypto_trading"
+  user: "ruslan"
+  password: "ruslan"
+  table: "raw_market_data"
+
+# Параметры данных
+data:
+  # Список торговых пар для анализа (из вашей БД)
+  symbols: 
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "BNBUSDT"
+    - "SOLUSDT"
+    - "XRPUSDT"
+    - "DOGEUSDT"
+    - "ADAUSDT"
+    - "AVAXUSDT"
+    - "DOTUSDT"
+    - "LINKUSDT"
+    - "LTCUSDT"
+    - "ATOMUSDT"
+    - "UNIUSDT"
+    - "ALGOUSDT"
+    - "NEARUSDT"
+    - "ICPUSDT"
+    - "TRBUSDT"
+    - "AAVEUSDT"
+    - "AXSUSDT"
+    - "GALAUSDT"
+    - "APEUSDT"
+    - "GMTUSDT"
+    - "CAKEUSDT"
+    - "1INCHUSDT"
+    - "ENSUSDT"
+    - "DYDXUSDT"
+    - "OPUSDT"
+    - "APTUSDT"
+    - "ARBUSDT"
+    - "SUIUSDT"
+    - "TIAUSDT"
+    - "TONUSDT"
+    - "TAOUSDT"
+    - "JTOUSDT"
+    - "OMUSDT"
+    - "HBARUSDT"
+    - "WIFUSDT"
+    - "POPCATUSDT"
+    - "PNUTUSDT"
+    - "1000PEPEUSDT"
+    - "ZEREBROUSDT"
+    - "FARTCOINUSDT"
+    - "MELANIAUSDT"
+    - "TRUMPUSDT"
+    - "GRIFFAINUSDT"
+    - "ENAUSDT"
+    - "ONDOUSDT"
+    - "LDOUSDT"
+    - "TRXUSDT"
+    - "TWTUSDT"
+  
+  # Временные параметры (адаптировано под ваши данные)
+  start_date: "2022-06-08"
+  end_date: "2025-06-16"
+  interval_minutes: 15
+  
+  # Разделение данных
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  
+  # Walk-forward параметры
+  walk_forward:
+    training_window: 180  # дней
+    validation_window: 30
+    test_window: 30
+    step_size: 7  # дней
+
+# Инженерия признаков
+features:
+  # Технические индикаторы
+  technical:
+    - name: "sma"
+      periods: [10, 20, 50]
+    - name: "ema"
+      periods: [12, 26]
+    - name: "rsi"
+      period: 14
+    - name: "macd"
+      fast: 12
+      slow: 26
+      signal: 9
+    - name: "bollinger_bands"
+      period: 20
+      std_dev: 2
+    - name: "atr"
+      period: 14
+    - name: "volume_profile"
+      bins: 20
+  
+  # Микроструктурные признаки
+  microstructure:
+    - "bid_ask_spread"
+    - "order_book_imbalance"
+    - "volume_weighted_price"
+    - "trade_flow_toxicity"
+  
+  # Кросс-активные признаки
+  cross_asset:
+    - "btc_dominance_effect"
+    - "sector_correlation"
+    - "lead_lag_signals"
+  
+  # Временные признаки
+  temporal:
+    - "hour_of_day"
+    - "day_of_week"
+    - "month_of_year"
+    - "is_weekend"
+
+# Параметры модели PatchTST
+model:
+  name: "PatchTST"
+  
+  # Архитектура
+  input_size: 100  # количество признаков
+  patch_len: 16    # длина патча
+  stride: 8        # шаг патча
+  context_window: 168  # входное окно (42 часа для 15-мин данных)
+  
+  # Transformer параметры
+  d_model: 128
+  n_heads: 8
+  e_layers: 3      # encoder layers
+  d_ff: 512        # feedforward dimension
+  dropout: 0.1
+  activation: "gelu"
+  
+  # Прогнозирование
+  pred_len: 4      # прогноз на 4 шага (1 час)
+  individual: false # channel-independent
+  
+  # Обучение
+  learning_rate: 0.001
+  batch_size: 32
+  epochs: 100
+  early_stopping_patience: 10
+  gradient_clip: 1.0
+
+# Управление рисками (адаптировано под ваши настройки)
+risk_management:
+  # Основные параметры
+  risk_reward_ratio: 3.0
+  stop_loss_pct: 1.1      # 1.1% стоп-лосс (как в вашем проекте)
+  take_profit_targets:    # Цели прибыли
+    - 1.2   # Первый уровень 20%
+    - 2.4   # Второй уровень 30%
+    - 3.5   # Третий уровень 30%
+    - 5.8   # Полный TP
+  
+  # Размер позиции
+  position_sizing:
+    method: "volatility_based"  # на основе ATR
+    max_position_pct: 10.0      # макс 10% портфеля
+    risk_per_trade_pct: 1.0     # риск 1% на сделку
+  
+  # Диверсификация
+  max_concurrent_positions: 10
+  max_positions_per_symbol: 1
+  
+  # Корректировка для разных типов монет
+  volatility_adjustment:
+    major_coins: ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+    major_risk_multiplier: 1.0
+    altcoin_risk_multiplier: 0.7
+    meme_coin_risk_multiplier: 0.5
+
+# Параметры бэктестирования
+backtesting:
+  initial_capital: 100000  # USD
+  commission: 0.001        # 0.1%
+  slippage: 0.0005        # 0.05%
+  
+  # Метрики для оценки
+  metrics:
+    - "total_return"
+    - "sharpe_ratio"
+    - "max_drawdown"
+    - "win_rate"
+    - "profit_factor"
+    - "expectancy"
+    - "calmar_ratio"
+
+# Ансамбль моделей
+ensemble:
+  enabled: true
+  models_count: 5
+  voting_method: "weighted_average"  # или "unanimous"
+  
+  # Веса на основе производительности
+  weight_metric: "sharpe_ratio"
+  rebalance_frequency: "weekly"
+
+# Логирование и мониторинг
+logging:
+  level: "INFO"
+  handlers:
+    - "console"
+    - "file"
+  
+  # Путь для логов
+  log_dir: "experiments/logs"
+  
+  # TensorBoard
+  tensorboard:
+    enabled: true
+    log_dir: "experiments/tensorboard"
+  
+  # Weights & Biases
+  wandb:
+    enabled: false
+    project: "crypto-ai-trading"
+    entity: "your-entity"
+
+# Производительность
+performance:
+  num_workers: 4          # для DataLoader
+  device: "cuda"          # или "cpu"
+  mixed_precision: true   # FP16 обучение
+  
+  # Кэширование
+  cache_features: true
+  cache_dir: "cache/"
+
+# Валидация
+validation:
+  # Статистические тесты
+  statistical_tests:
+    - "sharpe_ratio_test"
+    - "information_ratio"
+    - "monte_carlo_permutation"
+  
+  # Минимальные требования
+  min_sharpe_ratio: 1.5
+  min_win_rate: 0.25      # для риска 1:3
+  max_drawdown: 0.20      # 20%
