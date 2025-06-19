@@ -217,18 +217,36 @@ class Backtester:
             
             self.trades_log.append(trade_record)
     
-    def _apply_execution_costs(self, price: float, side: str) -> float:
-        """Применение slippage и комиссий к цене исполнения"""
+    def _apply_execution_costs(self, price: float, side: str, position_size: float = 0, market_data: pd.Series = None) -> float:
+        """Применение slippage и комиссий к цене исполнения с учетом market impact"""
+        
+        # Базовый slippage из конфига Bybit
+        bybit_config = self.config.get('bybit', {})
+        base_slippage = bybit_config.get('slippage', {}).get('base', 0.0005)
+        
+        # Market impact на основе объема позиции
+        market_impact = 0
+        if position_size > 0 and market_data is not None and 'volume' in market_data:
+            hourly_volume = market_data['volume'] * 4  # 15-мин свечи -> часовой объем
+            position_value = position_size * price
+            volume_ratio = position_value / (hourly_volume + 1e-8)
+            
+            # Порог для market impact из конфига
+            impact_threshold = bybit_config.get('slippage', {}).get('market_impact_threshold', 0.01)
+            
+            if volume_ratio > impact_threshold:
+                # Квадратичный market impact
+                market_impact = min(0.005, (volume_ratio / impact_threshold - 1) ** 2 * 0.001)
+        
+        total_slippage = base_slippage + market_impact
         
         # Применение slippage
         if side == 'long':
             # При покупке цена хуже (выше)
-            slippage_adjustment = price * self.slippage
-            execution_price = price + slippage_adjustment
+            execution_price = price * (1 + total_slippage)
         else:
             # При продаже цена хуже (ниже)
-            slippage_adjustment = price * self.slippage
-            execution_price = price - slippage_adjustment
+            execution_price = price * (1 - total_slippage)
         
         return execution_price
     
@@ -237,7 +255,8 @@ class Backtester:
         
         # Применение costs к цене закрытия
         execution_price = self._apply_execution_costs(close_price, 
-                                                     'short' if position.side == 'long' else 'long')
+                                                     'short' if position.side == 'long' else 'long',
+                                                     position.quantity)
         
         # Расчет P&L
         if position.side == 'long':
@@ -245,9 +264,25 @@ class Backtester:
         else:
             gross_pnl = (position.entry_price - execution_price) * position.quantity
         
-        # Применение комиссий
-        total_commission = (position.entry_price + execution_price) * position.quantity * self.commission
-        net_pnl = gross_pnl - total_commission
+        # Применение комиссий Bybit (maker/taker)
+        bybit_fees = self.config.get('bybit', {}).get('fees', {})
+        # Предполагаем taker для market orders
+        commission_rate = bybit_fees.get('taker', 0.00055)
+        
+        # Комиссия на вход и выход
+        entry_commission = position.entry_price * position.quantity * commission_rate
+        exit_commission = execution_price * position.quantity * commission_rate
+        total_commission = entry_commission + exit_commission
+        
+        # Funding rate для позиций > 8 часов
+        hold_time_hours = (datetime.now() - position.entry_time).total_seconds() / 3600
+        funding_cost = 0
+        if hold_time_hours > 8:
+            funding_periods = int(hold_time_hours / 8)
+            funding_rate = bybit_fees.get('funding_rate', 0.0001)
+            funding_cost = position.position_value * funding_rate * funding_periods
+        
+        net_pnl = gross_pnl - total_commission - funding_cost
         
         # Обновление капитала
         self.risk_manager.current_capital += net_pnl
@@ -279,7 +314,8 @@ class Backtester:
         
         # Применение costs
         execution_price = self._apply_execution_costs(close_price, 
-                                                     'short' if position.side == 'long' else 'long')
+                                                     'short' if position.side == 'long' else 'long',
+                                                     close_quantity)
         
         # Расчет P&L для закрываемой части
         if position.side == 'long':
@@ -287,8 +323,10 @@ class Backtester:
         else:
             gross_pnl = (position.entry_price - execution_price) * close_quantity
         
-        # Комиссии только на закрываемую часть
-        commission = execution_price * close_quantity * self.commission
+        # Комиссии только на закрываемую часть (Bybit taker fee)
+        bybit_fees = self.config.get('bybit', {}).get('fees', {})
+        commission_rate = bybit_fees.get('taker', 0.00055)
+        commission = execution_price * close_quantity * commission_rate
         net_pnl = gross_pnl - commission
         
         # Обновление капитала
