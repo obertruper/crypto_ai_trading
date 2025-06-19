@@ -111,10 +111,10 @@ class TimeSeriesDataset(Dataset):
         # Дополнительная информация
         info = {
             'symbol': index_info['symbol'],
-            'context_start_time': context_data.iloc[0]['datetime'],
-            'context_end_time': context_data.iloc[-1]['datetime'],
-            'target_start_time': target_data.iloc[0]['datetime'] if len(target_data) > 0 else None,
-            'target_end_time': target_data.iloc[-1]['datetime'] if len(target_data) > 0 else None
+            'context_start_time': str(context_data.iloc[0]['datetime']),
+            'context_end_time': str(context_data.iloc[-1]['datetime']),
+            'target_start_time': str(target_data.iloc[0]['datetime']) if len(target_data) > 0 else None,
+            'target_end_time': str(target_data.iloc[-1]['datetime']) if len(target_data) > 0 else None
         }
         
         return X, y, info
@@ -128,14 +128,19 @@ class TradingDataset(TimeSeriesDataset):
                  context_window: int = 168,
                  prediction_window: int = 4,
                  feature_cols: List[str] = None,
+                 target_cols: List[str] = None,
                  include_price_data: bool = True,
                  **kwargs):
         
         # Определяем целевые переменные для торговли
-        trading_targets = [
-            'target_tp_1.2', 'target_tp_2.4', 'target_tp_3.5', 'target_tp_5.8',
-            'target_sl_hit', 'optimal_action'
-        ]
+        # Используем доступные целевые переменные из данных
+        if target_cols is None:
+            # Автоматически находим целевые переменные
+            available_targets = [col for col in data.columns 
+                               if col.startswith(('target_', 'future_return_'))]
+            trading_targets = available_targets if available_targets else ['future_return_1', 'future_return_2', 'future_return_3', 'future_return_4']
+        else:
+            trading_targets = target_cols
         
         super().__init__(
             data=data,

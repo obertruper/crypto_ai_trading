@@ -151,7 +151,39 @@ class MetricsCalculator:
         """Расчет метрик для одной задачи"""
         metrics = {}
         
-        # Проверка размерности
+        # Обработка 3D тензоров (batch, time, features)
+        if predictions.ndim == 3:
+            # Reshape to 2D для вычисления метрик
+            batch_size, time_steps, n_features = predictions.shape
+            predictions = predictions.reshape(-1, n_features)
+            targets = targets.reshape(-1, n_features)
+            
+            # Проверка на NaN
+            if np.isnan(predictions).any() or np.isnan(targets).any():
+                # Заменяем NaN на 0 для вычисления метрик
+                predictions = np.nan_to_num(predictions, nan=0.0)
+                targets = np.nan_to_num(targets, nan=0.0)
+            
+            # Вычисляем метрики для каждого признака
+            for i in range(n_features):
+                pred_i = predictions[:, i]
+                target_i = targets[:, i]
+                
+                # Пропускаем если все значения NaN
+                if not np.isnan(pred_i).all() and not np.isnan(target_i).all():
+                    metrics[f'feature_{i}_mse'] = mean_squared_error(target_i, pred_i)
+                    metrics[f'feature_{i}_mae'] = mean_absolute_error(target_i, pred_i)
+                
+            # Общие метрики
+            try:
+                metrics['mse'] = mean_squared_error(targets, predictions)
+                metrics['mae'] = mean_absolute_error(targets, predictions)
+            except:
+                metrics['mse'] = np.nan
+                metrics['mae'] = np.nan
+            return metrics
+        
+        # Проверка размерности для 2D
         if predictions.ndim > 1 and predictions.shape[1] == 1:
             predictions = predictions.squeeze(1)
         if targets.ndim > 1 and targets.shape[1] == 1:

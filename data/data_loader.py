@@ -8,7 +8,8 @@ from typing import List, Optional, Tuple, Dict
 from datetime import datetime
 import psycopg2
 from psycopg2 import pool
-from sqlalchemy import create_engine
+from psycopg2.extras import RealDictCursor
+from sqlalchemy import create_engine, text
 import pickle
 from pathlib import Path
 import hashlib
@@ -29,15 +30,48 @@ class CryptoDataLoader:
         self.engine = self._create_engine()
         
     def _create_engine(self):
-        """Создание SQLAlchemy engine"""
-        db_config = self.config['database']
+        """Создание SQLAlchemy engine с поддержкой переменных окружения"""
+        db_config = self.config['database'].copy()
+        
+        # Обработка переменных окружения
+        for key, value in db_config.items():
+            if isinstance(value, str) and value.startswith('${'):
+                # Извлечение имени переменной и значения по умолчанию
+                var_name = value.split(':')[0][2:]
+                default_value = value.split(':')[1].rstrip('}')
+                db_config[key] = os.getenv(var_name, default_value)
+        
+        # Преобразование порта в int
+        db_config['port'] = int(db_config['port'])
+        
+        # Создание connection string
         connection_string = (
             f"postgresql://{db_config['user']}:{db_config['password']}@"
             f"{db_config['host']}:{db_config['port']}/{db_config['database']}"
         )
         
-        self.logger.info("Подключение к базе данных...")
-        return create_engine(connection_string, pool_size=10, max_overflow=20)
+        self.logger.info(f"Подключение к БД {db_config['database']} на {db_config['host']}:{db_config['port']}...")
+        
+        # Создание engine с дополнительными параметрами для стабильности
+        engine = create_engine(
+            connection_string,
+            pool_size=db_config.get('pool_size', 10),
+            max_overflow=db_config.get('max_overflow', 20),
+            pool_pre_ping=True,  # Проверка соединения перед использованием
+            echo=False  # Отключаем SQL логирование
+        )
+        
+        # Тест подключения
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text("SELECT 1"))
+                result.fetchone()
+            self.logger.info("✅ Подключение к БД успешно установлено")
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка подключения к БД: {e}")
+            raise
+            
+        return engine
     
     def _get_cache_key(self, symbols: List[str], start_date: str, end_date: str) -> str:
         """Генерация ключа кэша"""
@@ -91,6 +125,7 @@ class CryptoDataLoader:
         self.logger.start_stage("data_loading", symbols_count=len(symbols))
         
         try:
+            # SQL запрос для pandas (используем %s синтаксис)
             query = """
             SELECT 
                 id,
@@ -116,27 +151,46 @@ class CryptoDataLoader:
             chunk_size = 100000
             chunks = []
             
-            with self.engine.connect() as conn:
+            # Используем прямое подключение psycopg2 для загрузки данных
+            db_config = self.config['database'].copy()
+            # Обработка переменных окружения
+            for key, value in db_config.items():
+                if isinstance(value, str) and value.startswith('${'):
+                    var_name = value.split(':')[0][2:]
+                    default_value = value.split(':')[1].rstrip('}')
+                    db_config[key] = os.getenv(var_name, default_value)
+            db_config['port'] = int(db_config['port'])
+            
+            # Прямое подключение через psycopg2
+            conn = psycopg2.connect(
+                host=db_config['host'],
+                port=db_config['port'],
+                database=db_config['database'],
+                user=db_config['user'],
+                password=db_config['password']
+            )
+            
+            try:
                 # Подсчет общего количества записей
                 count_query = """
                 SELECT COUNT(*) 
                 FROM raw_market_data 
                 WHERE 
-                    symbol = ANY(%(symbols)s)
-                    AND datetime >= %(start_date)s
-                    AND datetime <= %(end_date)s
+                    symbol = ANY(%s)
+                    AND datetime >= %s
+                    AND datetime <= %s
                     AND market_type = 'futures'
                     AND interval_minutes = 15
                 """
                 
-                total_records = conn.execute(
-                    count_query,
-                    {"symbols": symbols, "start_date": start_date, "end_date": end_date}
-                ).scalar()
+                cursor = conn.cursor()
+                cursor.execute(count_query, (symbols, start_date, end_date))
+                total_records = cursor.fetchone()[0]
+                cursor.close()
                 
                 self.logger.info(f"Загрузка {total_records:,} записей...")
                 
-                # Загрузка данных по частям
+                # Загрузка данных через pandas
                 with tqdm(total=total_records, desc="Загрузка данных") as pbar:
                     for chunk in pd.read_sql(
                         query,
@@ -150,6 +204,8 @@ class CryptoDataLoader:
                     ):
                         chunks.append(chunk)
                         pbar.update(len(chunk))
+            finally:
+                conn.close()
             
             df = pd.concat(chunks, ignore_index=True)
             
@@ -202,7 +258,7 @@ class CryptoDataLoader:
         """
         
         with self.engine.connect() as conn:
-            result = conn.execute(query)
+            result = conn.execute(text(query))
             symbols = [row[0] for row in result]
         
         self.logger.info(f"Найдено {len(symbols)} доступных символов")
@@ -214,7 +270,7 @@ class CryptoDataLoader:
             query = """
             SELECT MIN(datetime), MAX(datetime)
             FROM raw_market_data
-            WHERE symbol = %(symbol)s AND market_type = 'futures'
+            WHERE symbol = :symbol AND market_type = 'futures'
             """
             params = {"symbol": symbol}
         else:
@@ -226,7 +282,7 @@ class CryptoDataLoader:
             params = {}
         
         with self.engine.connect() as conn:
-            result = conn.execute(query, params).fetchone()
+            result = conn.execute(text(query), params).fetchone()
             
         return result[0], result[1]
     
@@ -342,14 +398,14 @@ class CryptoDataLoader:
             MIN(datetime) as first_record,
             MAX(datetime) as last_record
         FROM raw_market_data 
-        WHERE symbol = ANY(%(symbols)s)
-        AND datetime BETWEEN %(start_date)s AND %(end_date)s
+        WHERE symbol = ANY(:symbols)
+        AND datetime BETWEEN :start_date AND :end_date
         AND market_type = 'futures'
         GROUP BY symbol
         """
         
         with self.engine.connect() as conn:
-            result = conn.execute(query, {
+            result = conn.execute(text(query), {
                 'symbols': symbols,
                 'start_date': start_date,
                 'end_date': end_date

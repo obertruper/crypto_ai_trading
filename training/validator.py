@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from utils.logger import get_logger
 from utils.metrics import MetricsCalculator
-from utils.visualization import create_prediction_plots, create_metrics_report
+from utils.visualization import TradingVisualizer
 
 
 class ModelValidator:

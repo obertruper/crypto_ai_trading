@@ -14,57 +14,20 @@ database:
 # Параметры данных
 data:
   # Список торговых пар для анализа (из вашей БД)
+  # Для первого запуска используем только топ-10 монет
   symbols: 
     - "BTCUSDT"
     - "ETHUSDT"
     - "BNBUSDT"
     - "SOLUSDT"
     - "XRPUSDT"
-    - "DOGEUSDT"
     - "ADAUSDT"
-    - "AVAXUSDT"
     - "DOTUSDT"
     - "LINKUSDT"
+    - "AVAXUSDT"
     - "LTCUSDT"
-    - "ATOMUSDT"
-    - "UNIUSDT"
-    - "ALGOUSDT"
-    - "NEARUSDT"
-    - "ICPUSDT"
-    - "TRBUSDT"
-    - "AAVEUSDT"
-    - "AXSUSDT"
-    - "GALAUSDT"
-    - "APEUSDT"
-    - "GMTUSDT"
-    - "CAKEUSDT"
-    - "1INCHUSDT"
-    - "ENSUSDT"
-    - "DYDXUSDT"
-    - "OPUSDT"
-    - "APTUSDT"
-    - "ARBUSDT"
-    - "SUIUSDT"
-    - "TIAUSDT"
-    - "TONUSDT"
-    - "TAOUSDT"
-    - "JTOUSDT"
-    - "OMUSDT"
-    - "HBARUSDT"
-    - "WIFUSDT"
-    - "POPCATUSDT"
-    - "PNUTUSDT"
-    - "1000PEPEUSDT"
-    - "ZEREBROUSDT"
-    - "FARTCOINUSDT"
-    - "MELANIAUSDT"
-    - "TRUMPUSDT"
-    - "GRIFFAINUSDT"
-    - "ENAUSDT"
-    - "ONDOUSDT"
-    - "LDOUSDT"
-    - "TRXUSDT"
-    - "TWTUSDT"
+  # Для загрузки всех символов используйте:
+  # symbols: ["ALL"]
   
   # Временные параметры (адаптировано под ваши данные)
   start_date: "2022-06-08"
@@ -149,11 +112,12 @@ model:
   individual: false    # channel-independent
   
   # Обучение
-  learning_rate: 0.001
+  learning_rate: 0.0001   # Уменьшен для стабильности
   batch_size: 32
   epochs: 100
   early_stopping_patience: 10
   gradient_clip: 1.0
+  warmup_steps: 1000      # Добавлен warmup
 
 # Управление рисками (адаптировано под ваши настройки)
 risk_management:

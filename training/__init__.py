@@ -8,7 +8,7 @@ from .optimizer import (
     LinearWarmupScheduler, CosineWarmupScheduler,
     create_optimizer_groups, get_linear_schedule_with_warmup
 )
-from .validator import ModelValidator, validate_checkpoint
+from .validator import ModelValidator
 
 __all__ = [
     'Trainer',
@@ -22,5 +22,4 @@ __all__ = [
     'create_optimizer_groups',
     'get_linear_schedule_with_warmup',
     'ModelValidator',
-    'validate_checkpoint'
 ]

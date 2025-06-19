@@ -47,6 +47,9 @@ class FeatureEngineer:
         result_df = pd.concat(featured_dfs, ignore_index=True)
         result_df = self._create_cross_asset_features(result_df)
         
+        # Обработка NaN значений
+        result_df = self._handle_missing_values(result_df)
+        
         # Walk-forward нормализация если указана дата
         if train_end_date:
             result_df = self._normalize_walk_forward(result_df, train_end_date)
@@ -73,15 +76,16 @@ class FeatureEngineer:
         if extreme_moves.sum() > 0:
             self.logger.warning(f"Обнаружено {extreme_moves.sum()} экстремальных движений цены")
             
-        # Проверка временных гэпов
+        # Проверка временных гэпов (только значительные разрывы > 2 часов)
         for symbol in df['symbol'].unique():
             symbol_data = df[df['symbol'] == symbol]
             time_diff = symbol_data['datetime'].diff()
             expected_diff = pd.Timedelta('15 minutes')
-            large_gaps = time_diff > expected_diff * 2
+            # Считаем большими только разрывы больше 2 часов (8 интервалов)
+            large_gaps = time_diff > expected_diff * 8
             
             if large_gaps.sum() > 0:
-                self.logger.warning(f"Символ {symbol}: обнаружено {large_gaps.sum()} больших временных разрывов")
+                self.logger.warning(f"Символ {symbol}: обнаружено {large_gaps.sum()} значительных временных разрывов (> 2 часов)")
     
     def _create_basic_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Базовые признаки из OHLCV данных без look-ahead bias"""
@@ -201,8 +205,9 @@ class FeatureEngineer:
         # Parabolic SAR
         psar = ta.trend.PSARIndicator(df['high'], df['low'], df['close'])
         df['psar'] = psar.psar()
-        df['psar_up'] = psar.psar_up()
-        df['psar_down'] = psar.psar_down()
+        # Вместо отдельных psar_up и psar_down, создаем индикатор направления
+        df['psar_trend'] = (df['close'] > df['psar']).astype(float)
+        df['psar_distance'] = (df['close'] - df['psar']) / df['close']
         
         return df
     
@@ -270,6 +275,52 @@ class FeatureEngineer:
         ).astype(int)
         
         return df
+    
+    def _handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Обработка пропущенных значений"""
+        self.logger.info("Обработка пропущенных значений...")
+        
+        # Сохраняем информационные колонки
+        info_cols = ['id', 'symbol', 'timestamp', 'datetime', 'open', 'high', 'low', 'close', 'volume', 'turnover']
+        
+        # Группируем по символам для правильной обработки
+        processed_dfs = []
+        
+        for symbol in df['symbol'].unique():
+            symbol_data = df[df['symbol'] == symbol].copy()
+            
+            # Для каждой колонки применяем соответствующий метод заполнения
+            for col in symbol_data.columns:
+                if col in info_cols:
+                    continue
+                    
+                if symbol_data[col].isna().any():
+                    # Для технических индикаторов используем forward fill
+                    if any(indicator in col for indicator in ['sma', 'ema', 'rsi', 'macd', 'bb_', 'adx']):
+                        symbol_data[col] = symbol_data[col].ffill()
+                    # Для остальных используем 0
+                    else:
+                        symbol_data[col] = symbol_data[col].fillna(0)
+            
+            # Удаляем первые строки где могут быть NaN из-за расчета индикаторов
+            # Находим максимальный период среди всех индикаторов
+            max_period = 50  # SMA50 требует минимум 50 периодов
+            symbol_data = symbol_data.iloc[max_period:].copy()
+            
+            processed_dfs.append(symbol_data)
+        
+        result_df = pd.concat(processed_dfs, ignore_index=True)
+        
+        # Финальная проверка
+        nan_count = result_df.isna().sum().sum()
+        if nan_count > 0:
+            self.logger.warning(f"Остались {nan_count} NaN значений после обработки")
+            # Принудительно заполняем оставшиеся NaN
+            numeric_cols = result_df.select_dtypes(include=[np.number]).columns
+            result_df[numeric_cols] = result_df[numeric_cols].fillna(0)
+        
+        self.logger.info(f"Обработка завершена. Итоговый размер: {len(result_df)} записей")
+        return result_df
     
     def _create_cross_asset_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Кросс-активные признаки"""

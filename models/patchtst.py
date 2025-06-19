@@ -303,6 +303,121 @@ class PatchTSTForTrading(PatchTST):
         }
 
 
+class PatchTSTForPrediction(nn.Module):
+    """PatchTST модель для предсказания целевых переменных"""
+    
+    def __init__(self,
+                 c_in: int,  # количество входных признаков
+                 c_out: int,  # количество выходных переменных
+                 context_window: int,
+                 target_window: int,
+                 patch_len: int = 16,
+                 stride: int = 8,
+                 n_layers: int = 3,
+                 d_model: int = 128,
+                 n_heads: int = 8,
+                 d_ff: int = 256,
+                 dropout: float = 0.0,
+                 **kwargs):
+        super().__init__()
+        
+        self.c_in = c_in
+        self.c_out = c_out
+        self.context_window = context_window
+        self.target_window = target_window
+        self.patch_len = patch_len
+        self.stride = stride
+        
+        self.num_patches = (context_window - patch_len) // stride + 1
+        
+        # Patch embedding
+        self.patch_embedding = PatchEmbedding(
+            patch_len=patch_len,
+            stride=stride,
+            in_channels=c_in,
+            embed_dim=d_model,
+            norm_layer=nn.LayerNorm
+        )
+        
+        # Positional encoding
+        self.pos_encoding = PositionalEncoding(d_model, max_len=self.num_patches)
+        
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=d_ff,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True
+        )
+        
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=n_layers,
+            norm=nn.LayerNorm(d_model)
+        )
+        
+        # Output projection
+        self.head_nf = d_model * self.num_patches
+        self.output_projection = nn.Sequential(
+            nn.Flatten(start_dim=-2),
+            nn.Linear(self.head_nf, d_ff),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, c_out * target_window)
+        )
+        
+        # Инициализация весов
+        self._init_weights()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, N = x.shape
+        
+        # Нормализация входных данных
+        x_mean = x.mean(dim=1, keepdim=True)
+        x_std = x.std(dim=1, keepdim=True) + 1e-5
+        x_norm = (x - x_mean) / x_std
+        
+        # Создание патчей
+        x_patches, _ = self.patch_embedding(x_norm)
+        
+        # Позиционное кодирование
+        x_patches = self.pos_encoding(x_patches)
+        
+        # Transformer encoder
+        x_encoded = self.transformer_encoder(x_patches)
+        
+        # Агрегация по всем признакам
+        # x_patches имеет размерность (B*N, num_patches, d_model)
+        # Нужно reshape обратно и усреднить по признакам
+        x_encoded = x_encoded.view(B, N, self.num_patches, -1)
+        x_encoded = x_encoded.mean(dim=1)  # Усреднение по признакам
+        
+        # Прогнозирование
+        output = self.output_projection(x_encoded)
+        
+        # Reshape to (B, target_window, c_out)
+        output = output.view(B, self.target_window, self.c_out)
+        
+        return output
+    
+    def _init_weights(self):
+        """Инициализация весов модели"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Conv1d):
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+
 def create_patchtst_model(config: Dict) -> PatchTSTForTrading:
     """Создание модели из конфигурации"""
     model_config = config['model']

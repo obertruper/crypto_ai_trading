@@ -248,9 +248,12 @@ class TradingLogger:
         """Warning уровень"""
         self.logger.warning(message, extra=kwargs)
     
-    def error(self, message: str, **kwargs):
+    def error(self, message: str, exc_info=None, **kwargs):
         """Error уровень"""
-        self.logger.error(message, extra=kwargs)
+        if exc_info is not None:
+            self.logger.error(message, exc_info=exc_info, extra=kwargs)
+        else:
+            self.logger.error(message, extra=kwargs)
     
     def critical(self, message: str, **kwargs):
         """Critical уровень"""
@@ -260,6 +263,29 @@ class TradingLogger:
 def get_logger(name: str) -> TradingLogger:
     """Получить экземпляр логгера"""
     return TradingLogger(name)
+
+
+def setup_logging(config: Dict[str, Any] = None) -> None:
+    """Глобальная настройка логирования"""
+    if config is None:
+        config = {
+            'logging': {
+                'level': 'INFO',
+                'handlers': ['console', 'file'],
+                'log_dir': 'experiments/logs'
+            }
+        }
+    
+    # Создание директории для логов
+    log_dir = Path(config['logging']['log_dir'])
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Базовая настройка логирования
+    logging.basicConfig(
+        level=config['logging']['level'],
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
 
 
 def log_execution_time(logger: TradingLogger):

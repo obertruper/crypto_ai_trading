@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Dict, List, Optional, Tuple, Callable, Union
 from pathlib import Path
 import time
 from tqdm import tqdm
@@ -201,7 +201,7 @@ class Trainer:
             
             # Обновление метрик
             epoch_loss += loss.item()
-            batch_metrics = self.metrics_tracker.compute_batch_metrics(outputs, targets)
+            batch_metrics = self.metrics_tracker.metrics_calculator.compute_batch_metrics(outputs, targets)
             
             for key, value in batch_metrics.items():
                 if key not in epoch_metrics:
@@ -249,7 +249,7 @@ class Trainer:
                 
                 # Обновление метрик
                 val_loss += loss.item()
-                batch_metrics = self.metrics_tracker.compute_batch_metrics(outputs, targets)
+                batch_metrics = self.metrics_tracker.metrics_calculator.compute_batch_metrics(outputs, targets)
                 
                 for key, value in batch_metrics.items():
                     if key not in val_metrics:
