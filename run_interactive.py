@@ -1326,12 +1326,26 @@ for _, row in df.iterrows():
             
             if result.returncode != 0:
                 self.console.print("[yellow]TensorBoard не запущен. Запускаем...[/yellow]")
+                
+                # Сначала проверяем, где есть логи
+                check_dirs = subprocess.run(
+                    ["ssh", ssh_alias, 
+                     "cd /root/crypto_ai_trading && find . -name 'events.out.tfevents*' | head -5"],
+                    capture_output=True,
+                    text=True
+                )
+                
+                if check_dirs.stdout.strip():
+                    self.console.print(f"[dim]Найдены логи: {check_dirs.stdout.strip().split()[0]}[/dim]")
+                
+                # Запускаем TensorBoard на порту 6007 (6006 занят Caddy)
                 subprocess.run(
                     ["ssh", ssh_alias, 
-                     "cd /root/crypto_ai_trading && nohup tensorboard --logdir experiments/runs --host 0.0.0.0 --port 6006 > /dev/null 2>&1 &"],
+                     "cd /root/crypto_ai_trading && pkill -f tensorboard; nohup tensorboard --logdir ./experiments/runs --bind_all --port 6007 > logs/tensorboard.log 2>&1 &"],
                     capture_output=True
                 )
-                time.sleep(2)
+                time.sleep(3)
+                self.console.print("[green]✅ TensorBoard запущен на порту 6007[/green]")
             
             # Запускаем SSH с пробросом портов
             self.console.print("[yellow]Открываем туннель к серверу...[/yellow]")
@@ -1343,7 +1357,8 @@ for _, row in df.iterrows():
             def open_browser():
                 time_module.sleep(3)  # Даем время на установку туннеля
                 self.console.print("\n[green]Открываем TensorBoard в браузере...[/green]")
-                webbrowser.open('http://localhost:6006')
+                self.console.print("[yellow]TensorBoard доступен на: http://localhost:6007[/yellow]")
+                webbrowser.open('http://localhost:6007')
             
             # Запускаем браузер в отдельном потоке
             browser_thread = threading.Thread(target=open_browser)

@@ -45,13 +45,14 @@ fi
 SSH_CMD="ssh -p $PORT root@$HOST"
 SSH_CMD="$SSH_CMD -i $KEY_PATH"
 SSH_CMD="$SSH_CMD -L 8080:localhost:8080"  # Web UI
-SSH_CMD="$SSH_CMD -L 6006:localhost:6006"  # TensorBoard
+SSH_CMD="$SSH_CMD -L 6006:localhost:6006"  # TensorBoard (Caddy)
+SSH_CMD="$SSH_CMD -L 6007:localhost:6007"  # TensorBoard (наш)
 SSH_CMD="$SSH_CMD -L 8888:localhost:8888"  # Jupyter
 
 echo -e "${GREEN}📡 Подключение к $HOST:$PORT${NC}"
 echo -e "${GREEN}🌐 Проброшенные порты:${NC}"
 echo "   • Web UI:     http://localhost:8080"
-echo "   • TensorBoard: http://localhost:6006"
+echo "   • TensorBoard: http://localhost:6007"
 echo "   • Jupyter:     http://localhost:8888"
 echo ""
 
@@ -70,12 +71,12 @@ if [ "$mode" = "2" ]; then
     echo -e "${GREEN}✅ Туннели установлены!${NC}"
     echo ""
     echo "Теперь вы можете использовать:"
-    echo "  • TensorBoard: http://localhost:6006"
+    echo "  • TensorBoard: http://localhost:6007"
     echo "  • Web UI: http://localhost:8080"
     echo "  • Jupyter: http://localhost:8888"
     echo ""
     echo -e "${YELLOW}Для остановки туннелей используйте:${NC}"
-    echo "  pkill -f 'ssh.*-L.*6006'"
+    echo "  pkill -f 'ssh.*-L.*6007'"
 else
     # Интерактивное подключение
     echo -e "${GREEN}Подключение к серверу...${NC}"
