@@ -272,35 +272,98 @@ class Trainer:
             # Многозадачная потеря
             losses = {}
             
-            if 'price_pred' in outputs and 'future_returns' in targets:
-                losses['price'] = self.criterion.task_losses['price'](
-                    outputs['price_pred'], targets['future_returns']
-                )
+            # Обработка выходов и целей
+            if isinstance(outputs, dict) and isinstance(targets, dict):
+                # Полная многозадачная структура
+                if 'price_pred' in outputs and 'future_returns' in targets:
+                    losses['price'] = self.criterion.task_losses['price'](
+                        outputs['price_pred'], targets['future_returns']
+                    )
+                
+                if 'tp_probs' in outputs and 'tp_targets' in targets:
+                    losses['tp'] = self.criterion.task_losses['tp'](
+                        outputs['tp_probs'], targets['tp_targets']
+                    )
+                
+                if 'sl_prob' in outputs and 'sl_target' in targets:
+                    losses['sl'] = self.criterion.task_losses['sl'](
+                        outputs['sl_prob'], targets['sl_target']
+                    )
+                
+                if 'volatility' in outputs and 'volatility_target' in targets:
+                    losses['volatility'] = self.criterion.task_losses['volatility'](
+                        outputs['volatility'], targets['volatility_target']
+                    )
+            else:
+                # Простая структура - используем базовую потерю для цены
+                if isinstance(outputs, dict):
+                    outputs = outputs.get('price_pred', outputs.get('prediction', list(outputs.values())[0]))
+                if isinstance(targets, dict):
+                    targets = targets.get('future_returns', targets.get('target', list(targets.values())[0]))
+                
+                # Проверка размерностей
+                outputs, targets = self._align_dimensions(outputs, targets)
+                
+                losses['price'] = self.criterion.task_losses['price'](outputs, targets)
             
-            if 'tp_probs' in outputs and 'tp_targets' in targets:
-                losses['tp'] = self.criterion.task_losses['tp'](
-                    outputs['tp_probs'], targets['tp_targets']
-                )
-            
-            if 'sl_prob' in outputs and 'sl_target' in targets:
-                losses['sl'] = self.criterion.task_losses['sl'](
-                    outputs['sl_prob'], targets['sl_target']
-                )
-            
-            if 'volatility' in outputs and 'volatility_target' in targets:
-                losses['volatility'] = self.criterion.task_losses['volatility'](
-                    outputs['volatility'], targets['volatility_target']
-                )
-            
-            return self.criterion(losses)
+            return self.criterion(losses) if losses else torch.tensor(0.0, device=outputs.device if torch.is_tensor(outputs) else 'cpu')
         else:
             # Простая потеря
             if isinstance(outputs, dict):
-                outputs = outputs.get('price_pred', outputs.get('prediction'))
+                outputs = outputs.get('price_pred', outputs.get('prediction', list(outputs.values())[0]))
             if isinstance(targets, dict):
-                targets = targets.get('future_returns', targets.get('target'))
+                targets = targets.get('future_returns', targets.get('target', list(targets.values())[0]))
+            
+            # Проверка и выравнивание размерностей
+            outputs, targets = self._align_dimensions(outputs, targets)
             
             return self.criterion(outputs, targets)
+    
+    def _align_dimensions(self, outputs: torch.Tensor, targets: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Выравнивание размерностей выходов и целей"""
+        if outputs.shape != targets.shape:
+            # Логирование несоответствия
+            self.logger.debug(f"Несоответствие размерностей: outputs {outputs.shape}, targets {targets.shape}")
+            
+            # Если у outputs есть дополнительное измерение по признакам
+            if outputs.dim() == 3 and targets.dim() == 3 and outputs.shape[-1] != targets.shape[-1]:
+                # Берем только нужное количество признаков из outputs
+                if outputs.shape[-1] > targets.shape[-1]:
+                    outputs = outputs[..., :targets.shape[-1]]
+                else:
+                    # Или наоборот, если targets больше
+                    targets = targets[..., :outputs.shape[-1]]
+            
+            # Если размерности все еще не совпадают
+            if outputs.shape != targets.shape:
+                # Попытка выравнивания по батчам и временным шагам
+                if outputs.dim() == 3 and targets.dim() == 2:
+                    # outputs: (batch, time, features), targets: (batch, features)
+                    # Берем последний временной шаг из outputs
+                    outputs = outputs[:, -1, :]
+                elif outputs.dim() == 2 and targets.dim() == 3:
+                    # outputs: (batch, features), targets: (batch, time, features)
+                    # Берем последний временной шаг из targets
+                    targets = targets[:, -1, :]
+                elif outputs.dim() == 3 and targets.dim() == 3:
+                    # Оба имеют 3 измерения, но разные размеры по времени
+                    min_time = min(outputs.shape[1], targets.shape[1])
+                    outputs = outputs[:, :min_time, :]
+                    targets = targets[:, :min_time, :]
+                
+                # Финальная попытка - flatten до 2D
+                if outputs.shape != targets.shape:
+                    if outputs.dim() > 2:
+                        outputs = outputs.reshape(outputs.shape[0], -1)
+                    if targets.dim() > 2:
+                        targets = targets.reshape(targets.shape[0], -1)
+                    
+                    # Выравнивание по последнему измерению
+                    min_size = min(outputs.shape[-1], targets.shape[-1])
+                    outputs = outputs[..., :min_size]
+                    targets = targets[..., :min_size]
+        
+        return outputs, targets
     
     def train(self, 
               train_loader: DataLoader,

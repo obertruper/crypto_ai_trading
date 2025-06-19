@@ -8,7 +8,14 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Optional, Tuple, Dict
 import math
-from einops import rearrange, repeat
+
+# Обработка импорта einops
+try:
+    from einops import rearrange, repeat
+    EINOPS_AVAILABLE = True
+except ImportError:
+    EINOPS_AVAILABLE = False
+    print("Warning: einops not available. Using manual tensor operations.")
 
 class PositionalEncoding(nn.Module):
     """Позиционное кодирование для трансформера"""
@@ -55,9 +62,17 @@ class PatchEmbedding(nn.Module):
         
         num_patches = (L - self.patch_len) // self.stride + 1
         
+        # Создание патчей
         patches = x.unfold(dimension=1, size=self.patch_len, step=self.stride)
+        # patches shape: (B, num_patches, C, patch_len)
         
-        patches = rearrange(patches, 'b n c p -> (b c) n p')
+        # Перестановка размерностей
+        if EINOPS_AVAILABLE:
+            patches = rearrange(patches, 'b n c p -> (b c) n p')
+        else:
+            # Ручная перестановка: (B, num_patches, C, patch_len) -> (B*C, num_patches, patch_len)
+            patches = patches.permute(0, 2, 1, 3).contiguous()  # (B, C, num_patches, patch_len)
+            patches = patches.view(B * C, num_patches, self.patch_len)  # (B*C, num_patches, patch_len)
         
         patches = self.proj(patches)
         patches = self.norm(patches)
@@ -84,223 +99,14 @@ class FlattenHead(nn.Module):
         x = self.dropout(x)
         x = self.linear(x)
         
-        x = rearrange(x, '(b n) t -> b t n', n=self.n_vars)
+        if EINOPS_AVAILABLE:
+            x = rearrange(x, '(b n) t -> b t n', n=self.n_vars)
+        else:
+            # Ручная перестановка: (B*n_vars, target_window) -> (B, target_window, n_vars)
+            x = x.view(-1, self.n_vars, x.size(-1))  # (B, n_vars, target_window)
+            x = x.transpose(1, 2)  # (B, target_window, n_vars)
         
         return x
-
-class PatchTST(nn.Module):
-    """PatchTST модель для многомерного прогнозирования временных рядов"""
-    
-    def __init__(self,
-                 c_in: int,
-                 context_window: int,
-                 target_window: int,
-                 patch_len: int = 16,
-                 stride: int = 8,
-                 n_layers: int = 3,
-                 d_model: int = 128,
-                 n_heads: int = 8,
-                 d_ff: int = 256,
-                 norm: str = 'LayerNorm',
-                 attn_dropout: float = 0.0,
-                 dropout: float = 0.0,
-                 act: str = 'gelu',
-                 individual: bool = False,
-                 pre_norm: bool = False,
-                 **kwargs):
-        super().__init__()
-        
-        self.c_in = c_in
-        self.context_window = context_window
-        self.target_window = target_window
-        self.patch_len = patch_len
-        self.stride = stride
-        self.individual = individual
-        
-        self.num_patches = (context_window - patch_len) // stride + 1
-        
-        self.patch_embedding = PatchEmbedding(
-            patch_len=patch_len,
-            stride=stride,
-            in_channels=c_in,
-            embed_dim=d_model,
-            norm_layer=nn.LayerNorm if norm == 'LayerNorm' else None
-        )
-        
-        self.pos_encoding = PositionalEncoding(d_model, max_len=self.num_patches)
-        
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_ff,
-            dropout=dropout,
-            activation=act,
-            batch_first=True,
-            norm_first=pre_norm
-        )
-        
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=n_layers,
-            norm=nn.LayerNorm(d_model) if not pre_norm else None
-        )
-        
-        self.head_nf = d_model * self.num_patches
-        
-        if individual:
-            self.heads = nn.ModuleList([
-                FlattenHead(1, self.head_nf, target_window, dropout)
-                for _ in range(c_in)
-            ])
-        else:
-            self.head = FlattenHead(c_in, self.head_nf, target_window, dropout)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, L, N = x.shape
-        
-        # Нормализация входных данных
-        x_mean = x.mean(dim=1, keepdim=True)
-        x_std = x.std(dim=1, keepdim=True) + 1e-5
-        x = (x - x_mean) / x_std
-        
-        # Создание патчей
-        x_patches, num_patches = self.patch_embedding(x)
-        
-        # Позиционное кодирование
-        x_patches = self.pos_encoding(x_patches)
-        
-        # Transformer encoder
-        x_encoded = self.transformer_encoder(x_patches)
-        
-        # Прогнозирование
-        if self.individual:
-            x_out = []
-            for i in range(self.c_in):
-                z = x_encoded[i::self.c_in]
-                z = self.heads[i](z)
-                x_out.append(z)
-            x_out = torch.cat(x_out, dim=-1)
-        else:
-            x_out = self.head(x_encoded)
-        
-        # Денормализация
-        last_mean = x_mean[:, -1:, :]
-        last_std = x_std[:, -1:, :]
-        x_out = x_out * last_std + last_mean
-        
-        return x_out
-    
-    def configure_optimizers(self, learning_rate: float, weight_decay: float = 0.01):
-        """Конфигурация оптимизатора"""
-        decay_params = []
-        no_decay_params = []
-        
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-            
-            if 'bias' in name or 'norm' in name:
-                no_decay_params.append(param)
-            else:
-                decay_params.append(param)
-        
-        optimizer = torch.optim.AdamW([
-            {'params': decay_params, 'weight_decay': weight_decay},
-            {'params': no_decay_params, 'weight_decay': 0.0}
-        ], lr=learning_rate)
-        
-        return optimizer
-
-
-class PatchTSTForTrading(PatchTST):
-    """Расширенная версия PatchTST для торговых сигналов"""
-    
-    def __init__(self, 
-                 c_in: int,
-                 context_window: int,
-                 target_window: int,
-                 num_tp_levels: int = 3,
-                 **kwargs):
-        super().__init__(
-            c_in=c_in,
-            context_window=context_window,
-            target_window=target_window,
-            **kwargs
-        )
-        
-        self.num_tp_levels = num_tp_levels
-        
-        hidden_size = self.head_nf // 2
-        
-        # Головы для take profit уровней
-        self.tp_heads = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(self.head_nf, hidden_size),
-                nn.ReLU(),
-                nn.Dropout(kwargs.get('dropout', 0.1)),
-                nn.Linear(hidden_size, target_window),
-                nn.Sigmoid()
-            )
-            for _ in range(num_tp_levels)
-        ])
-        
-        # Голова для stop loss
-        self.sl_head = nn.Sequential(
-            nn.Linear(self.head_nf, hidden_size),
-            nn.ReLU(),
-            nn.Dropout(kwargs.get('dropout', 0.1)),
-            nn.Linear(hidden_size, target_window),
-            nn.Sigmoid()
-        )
-        
-        # Голова для волатильности
-        self.volatility_head = nn.Sequential(
-            nn.Linear(self.head_nf, hidden_size),
-            nn.ReLU(),
-            nn.Dropout(kwargs.get('dropout', 0.1)),
-            nn.Linear(hidden_size, target_window),
-            nn.Softplus()
-        )
-    
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        B, L, N = x.shape
-        
-        # Нормализация входных данных
-        x_mean = x.mean(dim=1, keepdim=True)
-        x_std = x.std(dim=1, keepdim=True) + 1e-5
-        x_norm = (x - x_mean) / x_std
-        
-        # Создание патчей и обработка через трансформер
-        x_patches, _ = self.patch_embedding(x_norm)
-        x_patches = self.pos_encoding(x_patches)
-        x_encoded = self.transformer_encoder(x_patches)
-        
-        # Базовое прогнозирование цены
-        price_pred = super().forward(x)
-        
-        # Агрегация для торговых сигналов
-        x_pooled = x_encoded.view(B, N, -1).mean(dim=1)
-        
-        # Take profit вероятности
-        tp_probs = []
-        for tp_head in self.tp_heads:
-            tp_prob = tp_head(x_pooled)
-            tp_probs.append(tp_prob)
-        
-        tp_probs = torch.stack(tp_probs, dim=-1)
-        
-        # Stop loss вероятность
-        sl_prob = self.sl_head(x_pooled)
-        
-        # Прогноз волатильности
-        volatility = self.volatility_head(x_pooled)
-        
-        return {
-            'price_pred': price_pred,
-            'tp_probs': tp_probs,
-            'sl_prob': sl_prob,
-            'volatility': volatility
-        }
 
 
 class PatchTSTForPrediction(nn.Module):
@@ -327,8 +133,10 @@ class PatchTSTForPrediction(nn.Module):
         self.target_window = target_window
         self.patch_len = patch_len
         self.stride = stride
+        self.d_model = d_model
         
-        self.num_patches = (context_window - patch_len) // stride + 1
+        # Убедимся, что num_patches вычисляется правильно
+        self.num_patches = max(1, (context_window - patch_len) // stride + 1)
         
         # Patch embedding
         self.patch_embedding = PatchEmbedding(
@@ -374,13 +182,27 @@ class PatchTSTForPrediction(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, L, N = x.shape
         
+        # Проверка входных размерностей
+        if L != self.context_window:
+            raise ValueError(f"Expected context_window={self.context_window}, got L={L}")
+        if N != self.c_in:
+            raise ValueError(f"Expected c_in={self.c_in}, got N={N}")
+        
         # Нормализация входных данных
         x_mean = x.mean(dim=1, keepdim=True)
         x_std = x.std(dim=1, keepdim=True) + 1e-5
         x_norm = (x - x_mean) / x_std
         
         # Создание патчей
-        x_patches, _ = self.patch_embedding(x_norm)
+        x_patches, actual_num_patches = self.patch_embedding(x_norm)
+        # x_patches: (B*N, actual_num_patches, d_model)
+        
+        # Проверяем соответствие num_patches
+        if actual_num_patches != self.num_patches:
+            print(f"Warning: Expected {self.num_patches} patches, got {actual_num_patches}")
+            # Адаптируем размеры если необходимо
+            self.num_patches = actual_num_patches
+            self.head_nf = self.d_model * self.num_patches
         
         # Позиционное кодирование
         x_patches = self.pos_encoding(x_patches)
@@ -389,10 +211,11 @@ class PatchTSTForPrediction(nn.Module):
         x_encoded = self.transformer_encoder(x_patches)
         
         # Агрегация по всем признакам
-        # x_patches имеет размерность (B*N, num_patches, d_model)
+        # x_encoded имеет размерность (B*N, num_patches, d_model)
         # Нужно reshape обратно и усреднить по признакам
-        x_encoded = x_encoded.view(B, N, self.num_patches, -1)
-        x_encoded = x_encoded.mean(dim=1)  # Усреднение по признакам
+        d_model = x_encoded.size(-1)
+        x_encoded = x_encoded.view(B, N, self.num_patches, d_model)  # (B, N, num_patches, d_model)
+        x_encoded = x_encoded.mean(dim=1)  # (B, num_patches, d_model) - усреднение по признакам
         
         # Прогнозирование
         output = self.output_projection(x_encoded)
@@ -418,14 +241,16 @@ class PatchTSTForPrediction(nn.Module):
                     nn.init.zeros_(module.bias)
 
 
-def create_patchtst_model(config: Dict) -> PatchTSTForTrading:
+def create_patchtst_model(config: Dict) -> PatchTSTForPrediction:
     """Создание модели из конфигурации"""
     model_config = config['model']
     
     n_features = model_config.get('input_size', 100)
+    n_targets = model_config.get('output_size', 1)  # количество целевых переменных
     
-    model = PatchTSTForTrading(
+    model = PatchTSTForPrediction(
         c_in=n_features,
+        c_out=n_targets,
         context_window=model_config.get('context_window', 168),
         target_window=model_config.get('pred_len', 4),
         patch_len=model_config.get('patch_len', 16),
@@ -434,10 +259,7 @@ def create_patchtst_model(config: Dict) -> PatchTSTForTrading:
         d_model=model_config.get('d_model', 128),
         n_heads=model_config.get('n_heads', 8),
         d_ff=model_config.get('d_ff', 512),
-        dropout=model_config.get('dropout', 0.1),
-        act=model_config.get('activation', 'gelu'),
-        individual=model_config.get('individual', False),
-        num_tp_levels=len(config['risk_management']['take_profit_targets'])
+        dropout=model_config.get('dropout', 0.1)
     )
     
     return model

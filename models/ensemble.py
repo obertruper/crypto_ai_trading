@@ -11,7 +11,7 @@ import pickle
 from abc import ABC, abstractmethod
 
 from utils.logger import get_logger
-from .patchtst import PatchTSTForTrading
+from .patchtst import PatchTSTForPrediction
 
 class BaseEnsemble(nn.Module, ABC):
     """Базовый класс для ансамблей"""

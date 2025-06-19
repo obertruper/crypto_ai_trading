@@ -12,7 +12,7 @@ from pathlib import Path
 # Импорты из проекта
 from db_connection import get_db_config, load_data_simple
 from data.feature_engineering import FeatureEngineer
-from models.patchtst import PatchTST
+from models.patchtst import PatchTSTForPrediction
 from trading.risk_manager import RiskManager
 from trading.backtester import Backtester
 from utils.logger import get_logger

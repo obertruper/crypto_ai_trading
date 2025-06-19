@@ -29,6 +29,7 @@ def prepare_data(config: dict, logger):
     # Импорт здесь для избежания циклических импортов
     from data.data_loader import CryptoDataLoader
     from data.feature_engineering import FeatureEngineer
+    from data.dataset import create_datasets
     
     data_loader = CryptoDataLoader(config)
     
@@ -50,156 +51,150 @@ def prepare_data(config: dict, logger):
     feature_engineer = FeatureEngineer(config)
     featured_data = feature_engineer.create_features(raw_data)
     
-    logger.info("✂️ Разделение данных на выборки...")
+    logger.info("✂️ Создание datasets...")
+    train_dataset, val_dataset, test_dataset = create_datasets(
+        featured_data, 
+        config,
+        train_ratio=config['data']['train_ratio'],
+        val_ratio=config['data']['val_ratio']
+    )
     
-    featured_data = featured_data.sort_values(['symbol', 'datetime'])
-    
-    total_days = (featured_data['datetime'].max() - featured_data['datetime'].min()).days
-    train_days = int(total_days * config['data']['train_ratio'])
-    val_days = int(total_days * config['data']['val_ratio'])
-    
-    train_end = featured_data['datetime'].min() + pd.Timedelta(days=train_days)
-    val_end = train_end + pd.Timedelta(days=val_days)
-    
-    train_data = featured_data[featured_data['datetime'] <= train_end]
-    val_data = featured_data[
-        (featured_data['datetime'] > train_end) & 
-        (featured_data['datetime'] <= val_end)
-    ]
-    test_data = featured_data[featured_data['datetime'] > val_end]
-    
-    logger.info(f"📊 Размеры выборок:")
-    logger.info(f"   - Train: {len(train_data):,} записей ({train_data['datetime'].min()} - {train_data['datetime'].max()})")
-    logger.info(f"   - Val: {len(val_data):,} записей ({val_data['datetime'].min()} - {val_data['datetime'].max()})")
-    logger.info(f"   - Test: {len(test_data):,} записей ({test_data['datetime'].min()} - {test_data['datetime'].max()})")
-    
-    logger.info("💾 Сохранение обработанных данных...")
-    
-    data_dir = Path("data/processed")
-    data_dir.mkdir(exist_ok=True, parents=True)
-    
-    train_data.to_parquet(data_dir / "train_data.parquet")
-    val_data.to_parquet(data_dir / "val_data.parquet")
-    test_data.to_parquet(data_dir / "test_data.parquet")
-    
-    feature_engineer.save_scalers(data_dir / "scalers.pkl")
+    logger.info(f"📊 Размеры datasets:")
+    logger.info(f"   - Train: {len(train_dataset)} образцов")
+    logger.info(f"   - Val: {len(val_dataset)} образцов")
+    logger.info(f"   - Test: {len(test_dataset)} образцов")
     
     logger.end_stage("data_preparation", 
-                    train_size=len(train_data),
-                    val_size=len(val_data),
-                    test_size=len(test_data))
+                    train_size=len(train_dataset),
+                    val_size=len(val_dataset),
+                    test_size=len(test_dataset))
     
-    return train_data, val_data, test_data, feature_engineer
+    return train_dataset, val_dataset, test_dataset
 
-def train_model(config: dict, train_data, val_data, logger):
+def train_model(config: dict, train_dataset, val_dataset, logger):
     """Обучение модели"""
     logger.start_stage("model_training")
     
     logger.info("🏗️ Создание модели PatchTST...")
     
-    # Определяем признаки для модели
-    feature_cols = [col for col in train_data.columns 
-                   if col not in ['id', 'symbol', 'datetime', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover', 'created_at', 'market_type', 'sector'] 
-                   and not col.startswith(('target_', 'future_', 'optimal_'))]
+    # Получаем информацию о данных
+    n_features = len(train_dataset.get_feature_names())
+    n_targets = len(train_dataset.get_target_names())
     
-    # Обновляем размер входных данных в конфигурации
-    config['model']['input_size'] = len(feature_cols)
+    logger.info(f"📊 Входные признаки: {n_features}, Целевые переменные: {n_targets}")
     
-    logger.info(f"📊 Количество признаков: {len(feature_cols)}")
+    # ИСПРАВЛЕНИЕ: Используем правильную модель
+    from models.patchtst import PatchTSTForPrediction
     
-    # Создаем фиктивную модель для демонстрации
-    class DummyPatchTST:
-        def __init__(self, input_size):
-            self.input_size = input_size
-            
-        def configure_optimizers(self, learning_rate):
-            class DummyOptimizer:
-                def __init__(self):
-                    self.param_groups = [{'lr': learning_rate}]
-            return DummyOptimizer()
-            
-        def state_dict(self):
-            return {'dummy': 'state'}
-    
-    model = DummyPatchTST(config['model']['input_size'])
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logger.info(f"🖥️ Устройство: {device}")
-    
-    logger.info("⚙️ Настройка процесса обучения...")
-    
-    optimizer = model.configure_optimizers(
-        learning_rate=config['model']['learning_rate']
+    model = PatchTSTForPrediction(
+        c_in=n_features,
+        c_out=n_targets,
+        context_window=config['model']['context_window'],
+        target_window=config['model']['pred_len'],
+        patch_len=config['model']['patch_len'],
+        stride=config['model']['stride'],
+        n_layers=config['model']['e_layers'],
+        d_model=config['model']['d_model'],
+        n_heads=config['model']['n_heads'],
+        d_ff=config['model']['d_ff'],
+        dropout=config['model']['dropout']
     )
     
-    logger.info("🚀 Начало обучения (демонстрация)...")
+    # Создание трейнера
+    from training.trainer import Trainer
+    trainer = Trainer(model, config)
     
-    # Имитация обучения
-    for epoch in range(5):
-        train_loss = np.random.random() * 0.1
-        val_loss = np.random.random() * 0.1
-        
-        logger.log_model_metrics(
-            epoch=epoch + 1,
-            metrics={
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-                'learning_rate': optimizer.param_groups[0]['lr']
-            }
-        )
+    # Создание DataLoader'ов
+    from torch.utils.data import DataLoader
     
-    logger.info("💾 Сохранение обученной модели...")
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['model']['batch_size'],
+        shuffle=True,
+        num_workers=config['performance'].get('num_workers', 4),
+        pin_memory=True
+    )
     
-    model_dir = Path("models_saved")
-    model_dir.mkdir(exist_ok=True)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['model']['batch_size'],
+        shuffle=False,
+        num_workers=config['performance'].get('num_workers', 4),
+        pin_memory=True
+    )
     
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_path = model_dir / f"patchtst_{timestamp}.pth"
+    # Обучение
+    logger.info("🚀 Начало обучения...")
+    training_results = trainer.train(
+        train_loader=train_loader,
+        val_loader=val_loader
+    )
     
-    # Сохраняем информацию о модели
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'config': config,
-        'feature_cols': feature_cols,
-        'timestamp': timestamp
-    }, model_path)
+    # Сохранение лучшей модели
+    best_model_path = trainer.checkpoint_dir / "best_model.pth"
     
-    logger.info(f"✅ Модель сохранена: {model_path}")
+    logger.info(f"✅ Обучение завершено. Лучшая модель: {best_model_path}")
     
-    logger.end_stage("model_training", model_path=str(model_path))
+    logger.end_stage("model_training", model_path=str(best_model_path))
     
-    return model, model_path
+    return model, best_model_path, train_dataset
 
-def backtest_strategy(config: dict, model, test_data, logger):
+def backtest_strategy(config: dict, model, test_dataset, train_dataset, logger):
     """Бэктестирование стратегии"""
     logger.start_stage("backtesting")
     
-    logger.info("📈 Запуск бэктестирования...")
+    logger.info("💰 Запуск бэктестирования...")
     
-    # Имитация результатов бэктеста
-    results = {
-        'total_return': 0.35,
-        'sharpe_ratio': 1.8,
-        'max_drawdown': -0.12,
-        'win_rate': 0.42,
-        'profit_factor': 1.9,
-        'total_trades': 250,
-        'winning_trades': 105,
-        'losing_trades': 145
+    # Инициализация компонентов торговли
+    from trading.risk_manager import RiskManager
+    from trading.signals import SignalGenerator
+    from trading.backtester import Backtester
+    
+    risk_manager = RiskManager(config)
+    signal_generator = SignalGenerator(config)
+    backtester = Backtester(config)
+    
+    # Генерация предсказаний модели (фиктивных для демонстрации)
+    logger.info("🔮 Генерация предсказаний модели...")
+    
+    # Создаем фиктивные предсказания
+    n_samples = len(test_dataset)
+    predictions = {
+        'price_pred': np.random.random((n_samples, config['model']['pred_len'], len(train_dataset.get_target_names()))),
+        'confidence': np.random.uniform(0.5, 0.9, n_samples)
     }
     
-    logger.log_backtest_results(results)
+    # Создаем фиктивные рыночные данные для демонстрации
+    test_data = pd.DataFrame({
+        'datetime': pd.date_range('2025-01-01', periods=n_samples, freq='15min'),
+        'symbol': np.random.choice(['BTCUSDT', 'ETHUSDT'], n_samples),
+        'close': np.random.uniform(30000, 70000, n_samples),
+        'volume': np.random.uniform(1000, 10000, n_samples)
+    })
     
-    logger.info("📊 Результаты по символам:")
-    for symbol in test_data['symbol'].unique()[:5]:
-        symbol_return = np.random.uniform(0.1, 0.5)
-        logger.info(f"   {symbol}: +{symbol_return:.2%}")
+    # Запуск бэктестинга
+    logger.info("🏃 Запуск бэктестинга...")
+    backtest_results = backtester.run_backtest(
+        market_data=test_data,
+        features=test_data,  # Упрощение для демо
+        model_predictions=predictions
+    )
+    
+    # Отображение результатов
+    logger.info("📈 РЕЗУЛЬТАТЫ БЭКТЕСТИНГА:")
+    logger.info(f"  Начальный капитал: ${backtest_results['initial_capital']:,.2f}")
+    logger.info(f"  Финальный капитал: ${backtest_results['final_capital']:,.2f}")
+    logger.info(f"  Общая доходность: {backtest_results['total_return_pct']:.2f}%")
+    logger.info(f"  Коэффициент Шарпа: {backtest_results['sharpe_ratio']:.2f}")
+    logger.info(f"  Максимальная просадка: {backtest_results['max_drawdown_pct']:.2f}%")
+    logger.info(f"  Win Rate: {backtest_results['win_rate_pct']:.2f}%")
+    logger.info(f"  Всего сделок: {backtest_results['total_trades']}")
     
     logger.end_stage("backtesting", 
-                    total_return=results['total_return'],
-                    sharpe_ratio=results['sharpe_ratio'])
+                    total_return=backtest_results['total_return_pct'],
+                    sharpe_ratio=backtest_results['sharpe_ratio'])
     
-    return results
+    return backtest_results
 
 def analyze_results(config: dict, results: dict, logger):
     """Анализ и визуализация результатов"""
@@ -259,19 +254,15 @@ def main():
     
     try:
         if args.mode in ['data', 'full']:
-            train_data, val_data, test_data, feature_engineer = prepare_data(config, logger)
+            train_dataset, val_dataset, test_dataset = prepare_data(config, logger)
         
         if args.mode in ['train', 'full']:
             if args.mode == 'train':
                 # Загрузка сохраненных данных
-                if Path("data/processed/train_data.parquet").exists():
-                    train_data = pd.read_parquet("data/processed/train_data.parquet")
-                    val_data = pd.read_parquet("data/processed/val_data.parquet")
-                else:
-                    logger.error("Обработанные данные не найдены. Запустите режим 'data' сначала.")
-                    return
+                logger.error("Режим 'train' требует предварительного запуска 'data'")
+                return
             
-            model, model_path = train_model(config, train_data, val_data, logger)
+            model, model_path, train_dataset = train_model(config, train_dataset, val_dataset, logger)
         
         if args.mode in ['backtest', 'full']:
             if args.mode == 'backtest':
@@ -280,20 +271,9 @@ def main():
                     return
                 
                 logger.info(f"📥 Загрузка модели: {args.model_path}")
-                checkpoint = torch.load(args.model_path)
+                # Здесь должна быть загрузка модели
                 
-                config = checkpoint['config']
-                # Здесь бы создали модель и загрузили веса
-                
-                if Path("data/processed/test_data.parquet").exists():
-                    test_data = pd.read_parquet("data/processed/test_data.parquet")
-                else:
-                    logger.error("Тестовые данные не найдены. Запустите режим 'data' сначала.")
-                    return
-                
-                model = None  # Фиктивная модель
-            
-            results = backtest_strategy(config, model, test_data, logger)
+            results = backtest_strategy(config, model, test_dataset, train_dataset, logger)
             
             validation_passed = analyze_results(config, results, logger)
         

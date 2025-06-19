@@ -2,7 +2,7 @@
 >4C;L <>45;59 <0H8==>3> >1CG5=8O
 """
 
-from .patchtst import PatchTST, PatchTSTForTrading
+from .patchtst import PatchTSTForPrediction
 from .losses import (
     TradingLoss, DirectionalLoss, ProfitLoss, SharpeRatioLoss,
     MaxDrawdownLoss, RiskAdjustedLoss, FocalLoss, TripletLoss,
@@ -15,8 +15,7 @@ from .ensemble import (
 )
 
 __all__ = [
-    'PatchTST',
-    'PatchTSTForTrading',
+    'PatchTSTForPrediction',
     'TradingLoss',
     'DirectionalLoss',
     'ProfitLoss',

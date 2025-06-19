@@ -550,10 +550,10 @@ def validate_checkpoint(checkpoint_path: str,
     Returns:
         Результаты валидации
     """
-    from models.patchtst import PatchTSTForTrading
+    from models.patchtst import PatchTSTForPrediction
     
     # Загрузка модели
-    model = PatchTSTForTrading(**config['model'])
+    model = PatchTSTForPrediction(**config['model'])
     checkpoint = torch.load(checkpoint_path)
     model.load_state_dict(checkpoint['model_state_dict'])
     

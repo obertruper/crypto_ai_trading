@@ -437,6 +437,169 @@ except:
         
         Prompt.ask("\nНажмите Enter для продолжения")
     
+    def resume_training(self):
+        """Продолжить обучение с последней сохраненной модели"""
+        self.console.print("\n[cyan]Продолжение обучения с последней контрольной точки...[/cyan]")
+        
+        # Проверяем наличие сохраненных моделей
+        models_dir = Path("models_saved")
+        if not models_dir.exists() or not list(models_dir.glob("*.pth")):
+            self.console.print("[yellow]⚠️ Сохраненные модели не найдены[/yellow]")
+            Prompt.ask("\nНажмите Enter для продолжения")
+            return
+        
+        # Находим последнюю модель
+        latest_model = max(models_dir.glob("*.pth"), key=lambda x: x.stat().st_mtime)
+        self.console.print(f"[green]Найдена модель: {latest_model.name}[/green]")
+        
+        if Confirm.ask("\nПродолжить обучение с этой модели?"):
+            # TODO: Реализовать продолжение обучения
+            self.console.print("[yellow]Функция в разработке[/yellow]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def configure_training(self):
+        """Настройка параметров обучения"""
+        self.console.print("\n[cyan]⚙️ Настройки обучения:[/cyan]")
+        
+        # Показываем текущие настройки
+        table = Table(title="Текущие параметры обучения")
+        table.add_column("Параметр", style="cyan")
+        table.add_column("Значение", style="yellow")
+        
+        table.add_row("Эпохи", str(self.config['model']['epochs']))
+        table.add_row("Batch size", str(self.config['model']['batch_size']))
+        table.add_row("Learning rate", str(self.config['model']['learning_rate']))
+        table.add_row("Early stopping", str(self.config['model']['early_stopping_patience']))
+        table.add_row("Устройство", "GPU" if self.config['performance']['device'] == 'cuda' else "CPU")
+        
+        self.console.print(table)
+        
+        if Confirm.ask("\nИзменить параметры?"):
+            self.config['model']['epochs'] = IntPrompt.ask("Количество эпох", default=self.config['model']['epochs'])
+            self.config['model']['batch_size'] = IntPrompt.ask("Batch size", default=self.config['model']['batch_size'])
+            self.config['model']['learning_rate'] = FloatPrompt.ask("Learning rate", default=self.config['model']['learning_rate'])
+            self.config['model']['early_stopping_patience'] = IntPrompt.ask("Early stopping patience", default=self.config['model']['early_stopping_patience'])
+            
+            device_choice = Prompt.ask("Устройство (cpu/cuda)", default=self.config['performance']['device'])
+            self.config['performance']['device'] = device_choice
+            
+            self.save_config()
+            self.console.print("[green]✅ Параметры обучения обновлены[/green]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    
+    def launch_gpu_training(self):
+        """Запуск обучения на GPU"""
+        self.console.print("\n[cyan]🚀 Запуск обучения на GPU сервере[/cyan]")
+        
+        # Выбор режима
+        self.console.print("\n[cyan]Выберите режим обучения:[/cyan]")
+        self.console.print("1. Демо (5 эпох) - ~15-20 минут")
+        self.console.print("2. Стандартное (50 эпох) - ~2-3 часа")
+        self.console.print("3. Полное (100 эпох) - ~5-6 часов")
+        self.console.print("4. Пользовательское")
+        
+        choice = Prompt.ask("Выбор", default="1")
+        
+        epochs = {
+            "1": 5,
+            "2": 50,
+            "3": 100
+        }.get(choice)
+        
+        if choice == "4":
+            epochs = IntPrompt.ask("Количество эпох", default=20)
+        
+        if epochs:
+            # Временно обновляем конфигурацию
+            original_epochs = self.config['model']['epochs']
+            self.config['model']['epochs'] = epochs
+            self.save_config()
+            
+            self.console.print(f"\n[yellow]Запуск обучения на {epochs} эпох...[/yellow]")
+            
+            script_path = "scripts/run_on_vast.sh"
+            if os.path.exists(script_path):
+                try:
+                    subprocess.run([script_path])
+                except KeyboardInterrupt:
+                    self.console.print("\n[yellow]Прервано пользователем[/yellow]")
+            else:
+                self.console.print("[red]❌ Скрипт запуска не найден[/red]")
+            
+            # Восстанавливаем конфигурацию
+            self.config['model']['epochs'] = original_epochs
+            self.save_config()
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def monitor_gpu(self):
+        """Мониторинг GPU сервера"""
+        self.console.print("\n[cyan]📊 Команды для мониторинга GPU:[/cyan]")
+        self.console.print("\nПосле подключения к серверу используйте:")
+        self.console.print("   • nvidia-smi -l 1        # Мониторинг GPU в реальном времени")
+        self.console.print("   • htop                   # Мониторинг CPU и памяти")
+        self.console.print("   • tmux attach -t training # Подключение к сессии обучения")
+        self.console.print("   • tail -f logs/training_gpu.log # Просмотр логов")
+        self.console.print("\n[yellow]Для TensorBoard откройте http://localhost:6006[/yellow]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def show_gpu_instructions(self):
+        """Показать инструкции по GPU"""
+        self.console.print("\n[cyan]📋 Инструкция по работе с GPU сервером[/cyan]")
+        
+        instructions = """
+1. **Первоначальная настройка:**
+   - Создайте SSH ключ: ~/.ssh/vast_ai_key
+   - Установите права: chmod 600 ~/.ssh/vast_ai_key
+   
+2. **Рабочий процесс:**
+   - Синхронизируйте проект (опция 1)
+   - Подключитесь к серверу (опция 2)
+   - Запустите обучение (опция 3)
+   
+3. **Мониторинг:**
+   - TensorBoard: http://localhost:6006
+   - GPU статус: nvidia-smi -l 1
+   - Логи: tail -f logs/training_gpu.log
+   
+4. **Управление tmux:**
+   - Подключиться: tmux attach -t training
+   - Отключиться: Ctrl+B, затем D
+   - Список сессий: tmux ls
+        """
+        
+        self.console.print(Markdown(instructions))
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def configure_gpu_server(self):
+        """Настройка GPU сервера"""
+        self.console.print("\n[cyan]⚙️ Настройка GPU сервера[/cyan]")
+        
+        remote_config = self.config.setdefault('remote_server', {})
+        
+        self.console.print("\nТекущие настройки:")
+        self.console.print(f"Host: {remote_config.get('primary', {}).get('host', 'Не задан')}")
+        self.console.print(f"Port: {remote_config.get('primary', {}).get('port', 'Не задан')}")
+        
+        if Confirm.ask("\nИзменить настройки?"):
+            host = Prompt.ask("IP адрес сервера", default="114.32.64.6")
+            port = IntPrompt.ask("SSH порт", default=40134)
+            
+            remote_config['enabled'] = True
+            remote_config.setdefault('primary', {})['host'] = host
+            remote_config.setdefault('primary', {})['port'] = port
+            remote_config['user'] = 'root'
+            remote_config['key_path'] = '~/.ssh/vast_ai_key'
+            
+            self.save_config()
+            self.console.print("[green]✅ Настройки сохранены[/green]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
     def monitor_training(self):
         """Мониторинг обучения"""
         self.console.print("\n[cyan]Запуск мониторинга обучения...[/cyan]")
@@ -577,6 +740,674 @@ except:
             
             self.save_config()
             self.console.print("[green]✅ Список символов обновлен[/green]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def check_available_symbols(self):
+        """Проверка доступных символов"""
+        self.console.print("\n[cyan]Проверка доступных символов в БД...[/cyan]")
+        
+        try:
+            result = subprocess.run(
+                ["python", "-c", """
+import psycopg2
+import pandas as pd
+
+conn = psycopg2.connect(
+    host='localhost', port=5555, database='crypto_trading',
+    user='ruslan', password='ruslan'
+)
+
+query = '''
+SELECT DISTINCT symbol, COUNT(*) as records, 
+       MIN(datetime) as first_date, MAX(datetime) as last_date
+FROM raw_market_data
+GROUP BY symbol
+ORDER BY symbol
+'''
+
+df = pd.read_sql(query, conn)
+conn.close()
+
+print(f'\\nНайдено {len(df)} символов:\\n')
+for _, row in df.iterrows():
+    print(f"{row['symbol']:15} {row['records']:8,} записей  ({row['first_date'].strftime('%Y-%m-%d')} - {row['last_date'].strftime('%Y-%m-%d')})")
+                """],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                self.console.print(result.stdout)
+            else:
+                self.console.print(f"[red]❌ Ошибка: {result.stderr}[/red]")
+        except Exception as e:
+            self.console.print(f"[red]❌ Ошибка: {e}[/red]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def validate_data(self):
+        """Валидация данных"""
+        self.console.print("\n[cyan]Валидация данных...[/cyan]")
+        
+        cache_file = Path("cache/features_cache.pkl")
+        if not cache_file.exists():
+            self.console.print("[yellow]⚠️ Кэш данных не найден[/yellow]")
+            Prompt.ask("\nНажмите Enter для продолжения")
+            return
+        
+        try:
+            import pickle
+            with open(cache_file, 'rb') as f:
+                features = pickle.load(f)
+            
+            self.console.print(f"\n[green]✅ Данные загружены успешно[/green]")
+            self.console.print(f"Размер: {features.shape}")
+            self.console.print(f"Период: {features.datetime.min()} - {features.datetime.max()}")
+            
+            # Проверка на NaN
+            nan_count = features.isna().sum().sum()
+            if nan_count > 0:
+                self.console.print(f"\n[yellow]⚠️ Найдено {nan_count} NaN значений[/yellow]")
+            else:
+                self.console.print(f"\n[green]✅ NaN значений нет[/green]")
+            
+            # Проверка целевых переменных
+            target_cols = [col for col in features.columns if col.startswith('future_return_')]
+            self.console.print(f"\n[cyan]Целевые переменные ({len(target_cols)}):[/cyan]")
+            for col in target_cols:
+                mean_val = features[col].mean()
+                std_val = features[col].std()
+                self.console.print(f"  {col}: mean={mean_val:.4f}, std={std_val:.4f}")
+        
+        except Exception as e:
+            self.console.print(f"[red]❌ Ошибка при валидации: {e}[/red]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def run_backtesting(self):
+        """Запуск бэктестинга"""
+        self.console.print("\n[cyan]Бэктестинг стратегии[/cyan]")
+        
+        models_dir = Path("models_saved")
+        if not models_dir.exists() or not list(models_dir.glob("*.pth")):
+            self.console.print("[yellow]⚠️ Сохраненные модели не найдены[/yellow]")
+            self.console.print("Сначала обучите модель")
+            Prompt.ask("\nНажмите Enter для продолжения")
+            return
+        
+        # Выбор модели
+        models = sorted(models_dir.glob("*.pth"), key=lambda x: x.stat().st_mtime, reverse=True)
+        self.console.print("\n[cyan]Доступные модели:[/cyan]")
+        for i, model in enumerate(models[:5], 1):
+            self.console.print(f"{i}. {model.name}")
+        
+        choice = IntPrompt.ask("\nВыберите модель (0 для отмены)", default=1)
+        
+        if 0 < choice <= len(models[:5]):
+            selected_model = models[choice - 1]
+            self.console.print(f"\n[yellow]Запуск бэктестинга с моделью {selected_model.name}...[/yellow]")
+            
+            if Confirm.ask("Запустить бэктестинг?"):
+                subprocess.run([
+                    "python", "run_full_pipeline.py", 
+                    "--mode", "backtest",
+                    "--model", str(selected_model)
+                ])
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def generate_reports(self):
+        """Генерация отчетов"""
+        self.console.print("\n[cyan]Генерация отчетов[/cyan]")
+        
+        self.console.print("\n[cyan]Выберите тип отчета:[/cyan]")
+        self.console.print("1. Отчет по обучению")
+        self.console.print("2. Отчет по бэктестингу")
+        self.console.print("3. Анализ признаков")
+        self.console.print("4. Полный отчет")
+        
+        choice = Prompt.ask("Выбор", default="1")
+        
+        if choice == "1":
+            # Отчет по обучению
+            log_dir = Path("experiments/logs")
+            if log_dir.exists():
+                self.console.print("\n[yellow]Генерация отчета по обучению...[/yellow]")
+                # TODO: Реализовать генерацию отчета
+                self.console.print("[yellow]Функция в разработке[/yellow]")
+        
+        elif choice == "2":
+            # Отчет по бэктестингу
+            self.console.print("\n[yellow]Генерация отчета по бэктестингу...[/yellow]")
+            # TODO: Реализовать
+            self.console.print("[yellow]Функция в разработке[/yellow]")
+        
+        elif choice == "3":
+            # Анализ признаков
+            self.console.print("\n[yellow]Анализ важности признаков...[/yellow]")
+            # TODO: Реализовать
+            self.console.print("[yellow]Функция в разработке[/yellow]")
+        
+        elif choice == "4":
+            # Полный отчет
+            self.console.print("\n[yellow]Генерация полного отчета...[/yellow]")
+            # TODO: Реализовать
+            self.console.print("[yellow]Функция в разработке[/yellow]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def export_model(self):
+        """Экспорт модели"""
+        self.console.print("\n[cyan]Экспорт модели[/cyan]")
+        
+        models_dir = Path("models_saved")
+        if not models_dir.exists() or not list(models_dir.glob("*.pth")):
+            self.console.print("[yellow]⚠️ Сохраненные модели не найдены[/yellow]")
+            Prompt.ask("\nНажмите Enter для продолжения")
+            return
+        
+        # Выбор модели
+        models = sorted(models_dir.glob("*.pth"), key=lambda x: x.stat().st_mtime, reverse=True)
+        self.console.print("\n[cyan]Доступные модели:[/cyan]")
+        for i, model in enumerate(models[:5], 1):
+            size = model.stat().st_size / (1024 * 1024)  # MB
+            self.console.print(f"{i}. {model.name} ({size:.1f} MB)")
+        
+        choice = IntPrompt.ask("\nВыберите модель для экспорта (0 для отмены)", default=1)
+        
+        if 0 < choice <= len(models[:5]):
+            selected_model = models[choice - 1]
+            
+            self.console.print("\n[cyan]Формат экспорта:[/cyan]")
+            self.console.print("1. ONNX (универсальный)")
+            self.console.print("2. TorchScript")
+            self.console.print("3. Копировать файл")
+            
+            format_choice = Prompt.ask("Выбор", default="3")
+            
+            if format_choice == "3":
+                # Простое копирование
+                export_dir = Path("exports")
+                export_dir.mkdir(exist_ok=True)
+                
+                export_path = export_dir / f"model_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
+                
+                import shutil
+                shutil.copy2(selected_model, export_path)
+                
+                self.console.print(f"\n[green]✅ Модель экспортирована: {export_path}[/green]")
+            else:
+                self.console.print("[yellow]Функция в разработке[/yellow]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def configure_risk_management(self):
+        """Настройка риск-менеджмента"""
+        self.console.print("\n[cyan]⚙️ Настройки риск-менеджмента:[/cyan]")
+        
+        risk_config = self.config['risk_management']
+        
+        # Показываем текущие настройки
+        table = Table(title="Текущие параметры риск-менеджмента")
+        table.add_column("Параметр", style="cyan")
+        table.add_column("Значение", style="yellow")
+        
+        table.add_row("Stop Loss %", f"{risk_config['stop_loss_pct']}%")
+        table.add_row("Take Profit уровни", str(risk_config['take_profit_targets']))
+        table.add_row("Частичные закрытия", str(risk_config['partial_close_sizes']))
+        table.add_row("Макс риск на сделку", f"{risk_config['position_sizing']['max_risk_per_trade']}%")
+        table.add_row("Метод размера позиции", risk_config['position_sizing']['method'])
+        
+        self.console.print(table)
+        
+        if Confirm.ask("\nИзменить параметры?"):
+            risk_config['stop_loss_pct'] = FloatPrompt.ask("Stop Loss %", default=risk_config['stop_loss_pct'])
+            
+            # Take Profit уровни
+            tp_str = Prompt.ask("Take Profit уровни (через запятую)", default=",".join(map(str, risk_config['take_profit_targets'])))
+            risk_config['take_profit_targets'] = [float(x.strip()) for x in tp_str.split(",")]
+            
+            # Частичные закрытия
+            pc_str = Prompt.ask("Частичные закрытия % (через запятую)", default=",".join(map(str, risk_config['partial_close_sizes'])))
+            risk_config['partial_close_sizes'] = [int(x.strip()) for x in pc_str.split(",")]
+            
+            risk_config['position_sizing']['max_risk_per_trade'] = FloatPrompt.ask(
+                "Макс риск на сделку %", 
+                default=risk_config['position_sizing']['max_risk_per_trade']
+            )
+            
+            self.save_config()
+            self.console.print("[green]✅ Параметры риск-менеджмента обновлены[/green]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def configure_backtesting(self):
+        """Настройка параметров бэктестинга"""
+        self.console.print("\n[cyan]⚙️ Настройки бэктестинга:[/cyan]")
+        
+        backtest_config = self.config['backtesting']
+        
+        # Показываем текущие настройки
+        table = Table(title="Текущие параметры бэктестинга")
+        table.add_column("Параметр", style="cyan")
+        table.add_column("Значение", style="yellow")
+        
+        table.add_row("Начальный капитал", f"${backtest_config['initial_capital']:,}")
+        table.add_row("Комиссия", f"{backtest_config['commission']*100:.1f}%")
+        table.add_row("Проскальзывание", f"{backtest_config['slippage']*100:.2f}%")
+        
+        self.console.print(table)
+        
+        if Confirm.ask("\nИзменить параметры?"):
+            backtest_config['initial_capital'] = IntPrompt.ask(
+                "Начальный капитал $", 
+                default=backtest_config['initial_capital']
+            )
+            
+            commission_pct = FloatPrompt.ask(
+                "Комиссия %", 
+                default=backtest_config['commission']*100
+            )
+            backtest_config['commission'] = commission_pct / 100
+            
+            slippage_pct = FloatPrompt.ask(
+                "Проскальзывание %", 
+                default=backtest_config['slippage']*100
+            )
+            backtest_config['slippage'] = slippage_pct / 100
+            
+            self.save_config()
+            self.console.print("[green]✅ Параметры бэктестинга обновлены[/green]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def show_training_results(self):
+        """Показать результаты последнего обучения"""
+        self.console.print("\n[cyan]📊 Результаты последнего обучения[/cyan]")
+        
+        # Находим последнюю директорию с обучением
+        exp_dir = Path("experiments/runs")
+        if not exp_dir.exists():
+            self.console.print("[yellow]⚠️ Результаты обучения не найдены[/yellow]")
+            Prompt.ask("\nНажмите Enter для продолжения")
+            return
+        
+        training_dirs = sorted(exp_dir.glob("training_*"), key=lambda x: x.stat().st_mtime, reverse=True)
+        if not training_dirs:
+            self.console.print("[yellow]⚠️ Результаты обучения не найдены[/yellow]")
+            Prompt.ask("\nНажмите Enter для продолжения")
+            return
+        
+        latest_dir = training_dirs[0]
+        self.console.print(f"\n[green]Последнее обучение: {latest_dir.name}[/green]")
+        
+        # Читаем финальный отчет если есть
+        report_file = latest_dir / "final_report.txt"
+        if report_file.exists():
+            with open(report_file, 'r') as f:
+                self.console.print("\n[cyan]Финальный отчет:[/cyan]")
+                self.console.print(f.read())
+        
+        # Проверяем метрики
+        metrics_files = list(latest_dir.glob("*_metrics.csv"))
+        if metrics_files:
+            self.console.print("\n[cyan]Файлы метрик:[/cyan]")
+            for file in metrics_files:
+                self.console.print(f"  • {file.name}")
+        
+        # Проверяем графики
+        plots_dir = latest_dir / "plots"
+        if plots_dir.exists():
+            plots = list(plots_dir.glob("*.png"))
+            if plots:
+                self.console.print(f"\n[cyan]Найдено {len(plots)} графиков[/cyan]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def run_gpu_training(self):
+        """Обучение на GPU сервере"""
+        while True:
+            self.console.clear()
+            self.console.print(Panel("🚀 Обучение на GPU сервере (Vast.ai)", style="cyan"))
+            
+            # Информация о сервере
+            info_table = Table(show_header=False, box=None)
+            info_table.add_column("Parameter", style="cyan")
+            info_table.add_column("Value", style="white")
+            
+            info_table.add_row("📊 Информация о сервере:", "")
+            info_table.add_row("   • GPU:", "2x RTX 5090 (216.2 TFLOPS)")
+            info_table.add_row("   • VRAM:", "32 GB")
+            info_table.add_row("   • RAM:", "129 GB")
+            info_table.add_row("   • Ускорение:", "15-30x по сравнению с CPU")
+            
+            self.console.print(info_table)
+            
+            # Проверяем состояние сервера
+            with self.console.status("[cyan]Проверка подключения к серверу...[/cyan]"):
+                server_status = self._check_server_status()
+            
+            if server_status['connected']:
+                self.console.print("[green]✅ Сервер доступен[/green]")
+                if server_status['project_exists']:
+                    self.console.print("[green]✅ Проект синхронизирован[/green]")
+                else:
+                    self.console.print("[yellow]⚠️  Проект не найден на сервере[/yellow]")
+            else:
+                self.console.print("[red]❌ Сервер недоступен[/red]")
+            
+            # Меню действий
+            self.console.print("\n[bold cyan]Выберите действие:[/bold cyan]")
+            action_table = Table(show_header=False, box=None)
+            action_table.add_column("Option", style="cyan", width=5)
+            action_table.add_column("Description", style="white")
+            
+            action_table.add_row("1", "📤 Синхронизировать проект")
+            action_table.add_row("2", "🚀 Запустить обучение")
+            action_table.add_row("3", "📊 Мониторинг с браузером")
+            action_table.add_row("4", "📋 Проверить логи")
+            action_table.add_row("5", "🔧 Настройки сервера")
+            action_table.add_row("0", "Назад")
+            
+            self.console.print(action_table)
+            
+            choice = Prompt.ask("\n[bold cyan]Выберите опцию[/bold cyan]")
+            
+            if choice == "1":
+                self.sync_to_gpu_server()
+            elif choice == "2":
+                if not server_status['project_exists']:
+                    self.console.print("\n[yellow]⚠️  Сначала нужно синхронизировать проект![/yellow]")
+                    Prompt.ask("\nНажмите Enter для продолжения")
+                else:
+                    self.launch_gpu_training()
+            elif choice == "3":
+                self.monitor_with_browser()
+            elif choice == "4":
+                self.check_gpu_logs()
+            elif choice == "5":
+                self.configure_gpu_server()
+            elif choice == "0":
+                break
+    
+    def _check_server_status(self):
+        """Проверка состояния сервера"""
+        try:
+            # Проверяем доступность сервера
+            result = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=5", "-p", "40134", "root@114.32.64.6", 
+                 "test -d /root/crypto_ai_trading && echo 'PROJECT_EXISTS' || echo 'NO_PROJECT'"],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                project_exists = "PROJECT_EXISTS" in result.stdout
+                return {'connected': True, 'project_exists': project_exists}
+            else:
+                return {'connected': False, 'project_exists': False}
+        except:
+            return {'connected': False, 'project_exists': False}
+    
+    def sync_to_gpu_server(self):
+        """Синхронизация проекта с GPU сервером"""
+        self.console.print("\n[cyan]📤 Синхронизация проекта с GPU сервером...[/cyan]")
+        
+        script_path = "scripts/sync_to_vast.sh"
+        if Path(script_path).exists():
+            subprocess.run(["bash", script_path])
+            self.console.print("\n[green]✅ Синхронизация завершена[/green]")
+        else:
+            self.console.print(f"[red]❌ Скрипт {script_path} не найден[/red]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def launch_gpu_training(self):
+        """Запуск обучения на GPU сервере"""
+        self.console.print("\n[cyan]🚀 Запуск обучения на GPU сервере[/cyan]")
+        
+        # Проверяем наличие кэша локально
+        cache_file = Path("cache/features_cache.pkl")
+        if not cache_file.exists():
+            self.console.print("[red]❌ Файл кэша не найден локально![/red]")
+            self.console.print("[yellow]Сначала создайте кэш через 'Управление данными' -> 'Создать/обновить признаки'[/yellow]")
+            Prompt.ask("\nНажмите Enter для продолжения")
+            return
+        
+        # Проверяем наличие кэша на сервере
+        with self.console.status("[cyan]Проверка данных на сервере...[/cyan]"):
+            result = subprocess.run(
+                ["ssh", "-p", "40134", "root@114.32.64.6", 
+                 "test -f /root/crypto_ai_trading/cache/features_cache.pkl && echo 'EXISTS' || echo 'NOT_EXISTS'"],
+                capture_output=True,
+                text=True
+            )
+            
+        if "NOT_EXISTS" in result.stdout:
+            self.console.print("[yellow]📤 Кэш не найден на сервере. Копирование...[/yellow]")
+            self.console.print(f"[dim]Размер файла: {cache_file.stat().st_size / (1024*1024):.1f} MB[/dim]")
+            
+            # Создаем директорию и копируем файл
+            subprocess.run(["ssh", "-p", "40134", "root@114.32.64.6", "mkdir -p /root/crypto_ai_trading/cache"])
+            
+            with Progress() as progress:
+                task = progress.add_task("[cyan]Копирование кэша...", total=100)
+                result = subprocess.run(
+                    ["scp", "-P", "40134", str(cache_file), "root@114.32.64.6:/root/crypto_ai_trading/cache/"],
+                    capture_output=True,
+                    text=True
+                )
+                progress.update(task, completed=100)
+            
+            if result.returncode == 0:
+                self.console.print("[green]✅ Кэш скопирован на сервер[/green]")
+            else:
+                self.console.print("[red]❌ Ошибка копирования кэша[/red]")
+                Prompt.ask("\nНажмите Enter для продолжения")
+                return
+        else:
+            self.console.print("[green]✅ Кэш найден на сервере[/green]")
+        
+        # Выбор режима обучения
+        self.console.print("\n[bold cyan]Выберите режим обучения:[/bold cyan]")
+        self.console.print("1. Демо (5 эпох) - ~15-20 минут")
+        self.console.print("2. Стандартное (50 эпох) - ~2-3 часа")
+        self.console.print("3. Полное (100 эпох) - ~5-6 часов")
+        self.console.print("4. Пользовательское")
+        
+        choice = Prompt.ask("Выбор", default="1")
+        
+        if choice == "1":
+            epochs = 5
+            mode_choice = "1"
+        elif choice == "2":
+            epochs = 50
+            mode_choice = "3"
+        elif choice == "3":
+            epochs = 100
+            mode_choice = "2"
+        elif choice == "4":
+            epochs = IntPrompt.ask("Количество эпох", default=10)
+            mode_choice = "3"
+        else:
+            return
+        
+        self.console.print(f"\n[yellow]Запуск обучения на {epochs} эпох...[/yellow]")
+        
+        # Передаем выбор режима в скрипт через переменную окружения
+        env = os.environ.copy()
+        env['GPU_TRAINING_MODE'] = mode_choice
+        env['GPU_TRAINING_EPOCHS'] = str(epochs)
+        env['USE_CACHE_ONLY'] = '1'  # Флаг для использования кэша
+        
+        # Запуск скрипта на сервере
+        script_path = "scripts/run_on_vast.sh"
+        if Path(script_path).exists():
+            try:
+                # Запускаем скрипт и ждем его завершения
+                result = subprocess.run(
+                    ["bash", script_path], 
+                    env=env,
+                    capture_output=True,
+                    text=True
+                )
+                
+                # Показываем вывод скрипта
+                if result.stdout:
+                    print(result.stdout)
+                
+                if result.returncode == 0:
+                    self.console.print("\n[green]✅ Скрипт завершен успешно![/green]")
+                    
+                    # Предлагаем запустить мониторинг
+                    if Confirm.ask("\nЗапустить мониторинг в браузере?"):
+                        self.monitor_with_browser()
+                else:
+                    self.console.print(f"\n[red]❌ Ошибка запуска: код {result.returncode}[/red]")
+                    if result.stderr:
+                        self.console.print(f"[red]{result.stderr}[/red]")
+            except Exception as e:
+                self.console.print(f"[red]❌ Ошибка: {e}[/red]")
+        else:
+            self.console.print(f"[red]❌ Скрипт {script_path} не найден[/red]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def monitor_with_browser(self):
+        """Мониторинг с автоматическим запуском браузера"""
+        self.console.print("\n[cyan]📊 Запуск мониторинга обучения...[/cyan]")
+        
+        # Проверяем, запущен ли TensorBoard на сервере
+        self.console.print("[yellow]Проверка TensorBoard на сервере...[/yellow]")
+        
+        result = subprocess.run(
+            ["ssh", "-p", "40134", "-i", os.path.expanduser("~/.ssh/vast_ai_key"), 
+             "root@114.32.64.6", "pgrep -f tensorboard"],
+            capture_output=True
+        )
+        
+        if result.returncode != 0:
+            self.console.print("[yellow]TensorBoard не запущен. Запускаем...[/yellow]")
+            subprocess.run(
+                ["ssh", "-p", "40134", "-i", os.path.expanduser("~/.ssh/vast_ai_key"),
+                 "root@114.32.64.6", 
+                 "cd /root/crypto_ai_trading && nohup tensorboard --logdir experiments/runs --host 0.0.0.0 --port 6006 > /dev/null 2>&1 &"],
+                capture_output=True
+            )
+            time.sleep(2)
+        
+        # Запускаем SSH с пробросом портов
+        self.console.print("[yellow]Открываем туннель к серверу...[/yellow]")
+        
+        import threading
+        import webbrowser
+        import time
+        
+        def open_browser():
+            time.sleep(3)  # Даем время на установку туннеля
+            self.console.print("\n[green]Открываем TensorBoard в браузере...[/green]")
+            webbrowser.open('http://localhost:6006')
+        
+        # Запускаем браузер в отдельном потоке
+        browser_thread = threading.Thread(target=open_browser)
+        browser_thread.start()
+        
+        # Запускаем SSH туннель с автоматическим выбором
+        env = os.environ.copy()
+        env['VAST_CONNECTION_MODE'] = '1'  # Прямое подключение
+        
+        script_path = "scripts/connect_vast.sh"
+        if Path(script_path).exists():
+            try:
+                subprocess.run(["bash", script_path], env=env)
+            except KeyboardInterrupt:
+                self.console.print("\n[yellow]Мониторинг остановлен[/yellow]")
+            except Exception as e:
+                self.console.print(f"[red]❌ Ошибка: {e}[/red]")
+        else:
+            self.console.print(f"[red]❌ Скрипт {script_path} не найден[/red]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def check_gpu_logs(self):
+        """Проверить логи на GPU сервере"""
+        self.console.print("\n[cyan]📋 Получение логов с сервера...[/cyan]")
+        
+        result = subprocess.run(
+            ["ssh", "-p", "40134", "root@114.32.64.6", 
+             "tail -n 50 /root/crypto_ai_trading/logs/training_gpu.log 2>/dev/null || echo 'Логи не найдены'"],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            self.console.print("\n[yellow]Последние строки лога:[/yellow]")
+            self.console.print(result.stdout)
+        else:
+            self.console.print("[red]❌ Не удалось получить логи[/red]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def configure_gpu_server(self):
+        """Настройка GPU сервера"""
+        self.console.print("\n[cyan]⚙️ Настройка GPU сервера[/cyan]")
+        
+        remote_config = self.config.setdefault('remote_server', {})
+        
+        self.console.print("\nТекущие настройки:")
+        self.console.print(f"Host: {remote_config.get('primary', {}).get('host', 'Не задан')}")
+        self.console.print(f"Port: {remote_config.get('primary', {}).get('port', 'Не задан')}")
+        
+        if Confirm.ask("\nИзменить настройки?"):
+            host = Prompt.ask("IP адрес сервера", default="114.32.64.6")
+            port = IntPrompt.ask("SSH порт", default=40134)
+            
+            remote_config['enabled'] = True
+            remote_config.setdefault('primary', {})['host'] = host
+            remote_config.setdefault('primary', {})['port'] = port
+            remote_config['user'] = 'root'
+            remote_config['key_path'] = '~/.ssh/vast_ai_key'
+            
+            self.save_config()
+            self.console.print("[green]✅ Настройки сохранены[/green]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def clear_logs(self):
+        """Очистка логов"""
+        self.console.print("\n[cyan]🗑️ Очистка логов[/cyan]")
+        
+        log_dirs = [
+            Path("logs"),
+            Path("experiments/logs"),
+            Path("experiments/runs")
+        ]
+        
+        total_size = 0
+        file_count = 0
+        
+        for log_dir in log_dirs:
+            if log_dir.exists():
+                for file in log_dir.rglob("*"):
+                    if file.is_file():
+                        total_size += file.stat().st_size
+                        file_count += 1
+        
+        if file_count > 0:
+            size_mb = total_size / (1024 * 1024)
+            self.console.print(f"\nНайдено {file_count} файлов ({size_mb:.1f} MB)")
+            
+            if Confirm.ask("Удалить все логи?"):
+                for log_dir in log_dirs:
+                    if log_dir.exists():
+                        import shutil
+                        shutil.rmtree(log_dir)
+                        log_dir.mkdir(exist_ok=True)
+                
+                self.console.print("[green]✅ Логи очищены[/green]")
+        else:
+            self.console.print("[yellow]Логи не найдены[/yellow]")
         
         Prompt.ask("\nНажмите Enter для продолжения")
     

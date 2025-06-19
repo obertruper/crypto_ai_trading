@@ -42,6 +42,35 @@ def run_data_pipeline(config: dict, logger):
     logger.info("📊 ЭТАП 1: ЗАГРУЗКА И ПОДГОТОВКА ДАННЫХ")
     logger.info("="*80)
     
+    # Проверяем флаг использования кэша
+    use_cache_only = os.environ.get('USE_CACHE_ONLY', '0')
+    logger.info(f"🔍 USE_CACHE_ONLY = '{use_cache_only}'")
+    
+    if use_cache_only == '1':
+        logger.info("📦 Используется режим работы с кэшем (без БД)")
+        cache_path = Path("cache/features_cache.pkl")
+        
+        if not cache_path.exists():
+            logger.error(f"❌ Файл кэша не найден: {cache_path}")
+            logger.error(f"Текущая директория: {os.getcwd()}")
+            logger.error(f"Содержимое cache/: {list(Path('cache').glob('*')) if Path('cache').exists() else 'Директория не существует'}")
+            raise FileNotFoundError(f"Файл кэша не найден: {cache_path}")
+        
+        logger.info(f"✅ Загрузка данных из кэша: {cache_path}")
+        logger.info(f"📏 Размер файла: {cache_path.stat().st_size / (1024*1024):.1f} MB")
+        
+        import pickle
+        with open(cache_path, 'rb') as f:
+            features_df = pickle.load(f)
+        
+        logger.info(f"✅ Загружено {len(features_df):,} записей из кэша")
+        logger.info(f"📊 Форма данных: {features_df.shape}")
+        logger.info(f"📅 Период: {features_df['datetime'].min()} - {features_df['datetime'].max()}")
+        logger.info(f"🏷️ Символы: {sorted(features_df['symbol'].unique())}")
+        
+        return features_df
+    
+    # Обычный режим работы с БД
     # Инициализация загрузчика данных
     data_loader = CryptoDataLoader(config)
     
@@ -305,6 +334,8 @@ def main():
     logger.info("🚀 ЗАПУСК CRYPTO AI TRADING SYSTEM")
     logger.info(f"📋 Режим: {args.mode}")
     logger.info(f"⚙️ Конфигурация: {args.config}")
+    logger.info(f"🖥️ Устройство: {config['performance']['device']}")
+    logger.info(f"📦 USE_CACHE_ONLY: {os.environ.get('USE_CACHE_ONLY', 'не установлено')}")
     logger.info("="*80)
     
     try:
