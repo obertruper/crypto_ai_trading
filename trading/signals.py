@@ -81,16 +81,46 @@ class SignalGenerator:
         return ranked_signals
     
     def _extract_symbol_predictions(self, predictions: Dict, symbol: str) -> Optional[Dict]:
-        """Извлечение предсказаний для конкретного символа"""
-        # Здесь должна быть логика извлечения предсказаний из модели
-        # Для демонстрации используем случайные значения
+        """Извлечение реальных предсказаний модели для конкретного символа"""
+        if not predictions:
+            self.logger.warning(f"Получены пустые предсказания")
+            return None
+            
+        if symbol not in predictions:
+            self.logger.warning(f"Отсутствуют предсказания для символа {symbol}")
+            return None
         
-        return {
-            'tp_probs': np.random.random(len(self.tp_levels)),
-            'sl_prob': np.random.random(),
-            'volatility': np.random.random() * 0.1,
-            'price_pred': np.random.random() * 0.02 - 0.01  # -1% до +1%
-        }
+        symbol_predictions = predictions[symbol]
+        
+        # Валидация структуры предсказаний
+        required_keys = ['tp_probs', 'sl_prob', 'volatility', 'price_pred']
+        missing_keys = [key for key in required_keys if key not in symbol_predictions]
+        
+        if missing_keys:
+            self.logger.error(f"Отсутствуют ключи в предсказаниях для {symbol}: {missing_keys}")
+            return None
+        
+        # Валидация значений
+        tp_probs = symbol_predictions['tp_probs']
+        if not isinstance(tp_probs, (list, np.ndarray)) or len(tp_probs) != len(self.tp_levels):
+            self.logger.error(f"Неверный формат tp_probs для {symbol}: ожидалось {len(self.tp_levels)} значений")
+            return None
+        
+        # Проверка на валидность вероятностей
+        if isinstance(tp_probs, np.ndarray):
+            tp_probs = tp_probs.tolist()
+        
+        for prob in tp_probs:
+            if not 0 <= prob <= 1:
+                self.logger.error(f"Невалидная вероятность TP для {symbol}: {prob}")
+                return None
+        
+        sl_prob = symbol_predictions['sl_prob']
+        if not 0 <= sl_prob <= 1:
+            self.logger.error(f"Невалидная вероятность SL для {symbol}: {sl_prob}")
+            return None
+        
+        return symbol_predictions
     
     def _generate_symbol_signal(self, 
                                symbol: str, 

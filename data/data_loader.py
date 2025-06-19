@@ -6,10 +6,8 @@ import pandas as pd
 import numpy as np
 from typing import List, Optional, Tuple, Dict
 from datetime import datetime
-import psycopg2
-from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import QueuePool
 import pickle
 from pathlib import Path
 import hashlib
@@ -18,6 +16,7 @@ from contextlib import contextmanager
 import os
 
 from utils.logger import get_logger
+from utils.config_validator import validate_dataframe
 
 class CryptoDataLoader:
     """Загрузчик исторических данных криптовалютных фьючерсов"""
@@ -93,16 +92,45 @@ class CryptoDataLoader:
         return None
     
     def _save_to_cache(self, data: pd.DataFrame, cache_key: str):
-        """Сохранение данных в кэш"""
-        if self.config.get('performance', {}).get('cache_features', True):
-            cache_file = self.cache_dir / f"{cache_key}.pkl"
-            self.logger.info(f"Сохранение данных в кэш: {cache_file}")
+        """Безопасное сохранение данных в кэш с ограничением размера"""
+        if not self.config.get('performance', {}).get('cache_features', True):
+            return
+        
+        cache_file = self.cache_dir / f"{cache_key}.pkl"
+        
+        # Проверка размера данных
+        data_size_mb = data.memory_usage(deep=True).sum() / 1024 / 1024
+        max_cache_size_mb = self.config.get('performance', {}).get('max_cache_size_mb', 500)
+        
+        if data_size_mb > max_cache_size_mb:
+            self.logger.warning(f"Данные слишком большие для кэша: {data_size_mb:.1f}MB > {max_cache_size_mb}MB")
+            return
+        
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
             
-            try:
-                with open(cache_file, 'wb') as f:
-                    pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-            except Exception as e:
-                self.logger.warning(f"Ошибка сохранения кэша: {e}")
+            self.logger.info(f"Кэш сохранен: {cache_file} ({data_size_mb:.1f}MB)")
+            
+            # Очистка старых файлов кэша
+            self._cleanup_old_cache_files()
+            
+        except Exception as e:
+            self.logger.warning(f"Ошибка сохранения кэша: {e}")
+    
+    def _cleanup_old_cache_files(self):
+        """Очистка старых файлов кэша"""
+        cache_files = list(self.cache_dir.glob("*.pkl"))
+        max_cache_files = self.config.get('performance', {}).get('max_cache_files', 10)
+        
+        if len(cache_files) > max_cache_files:
+            # Сортируем по времени модификации и удаляем старые
+            cache_files.sort(key=lambda x: x.stat().st_mtime)
+            files_to_remove = cache_files[:-max_cache_files]
+            
+            for file in files_to_remove:
+                file.unlink()
+                self.logger.info(f"Удален старый кэш файл: {file}")
     
     def load_data(self, 
                   symbols: Optional[List[str]] = None,
@@ -125,8 +153,8 @@ class CryptoDataLoader:
         self.logger.start_stage("data_loading", symbols_count=len(symbols))
         
         try:
-            # SQL запрос для pandas (используем %s синтаксис)
-            query = """
+            # SQL запрос для SQLAlchemy
+            query = text("""
             SELECT 
                 id,
                 symbol,
@@ -140,53 +168,38 @@ class CryptoDataLoader:
                 turnover
             FROM raw_market_data
             WHERE 
-                symbol = ANY(%(symbols)s)
-                AND datetime >= %(start_date)s
-                AND datetime <= %(end_date)s
+                symbol = ANY(:symbols)
+                AND datetime >= :start_date
+                AND datetime <= :end_date
                 AND market_type = 'futures'
                 AND interval_minutes = 15
             ORDER BY symbol, datetime
-            """
+            """)
             
             chunk_size = 100000
             chunks = []
             
-            # Используем прямое подключение psycopg2 для загрузки данных
-            db_config = self.config['database'].copy()
-            # Обработка переменных окружения
-            for key, value in db_config.items():
-                if isinstance(value, str) and value.startswith('${'):
-                    var_name = value.split(':')[0][2:]
-                    default_value = value.split(':')[1].rstrip('}')
-                    db_config[key] = os.getenv(var_name, default_value)
-            db_config['port'] = int(db_config['port'])
+            # Используем SQLAlchemy для всех операций с БД
             
-            # Прямое подключение через psycopg2
-            conn = psycopg2.connect(
-                host=db_config['host'],
-                port=db_config['port'],
-                database=db_config['database'],
-                user=db_config['user'],
-                password=db_config['password']
-            )
-            
-            try:
+            with self.engine.connect() as conn:
                 # Подсчет общего количества записей
-                count_query = """
+                count_query = text("""
                 SELECT COUNT(*) 
                 FROM raw_market_data 
                 WHERE 
-                    symbol = ANY(%s)
-                    AND datetime >= %s
-                    AND datetime <= %s
+                    symbol = ANY(:symbols)
+                    AND datetime >= :start_date
+                    AND datetime <= :end_date
                     AND market_type = 'futures'
                     AND interval_minutes = 15
-                """
+                """)
                 
-                cursor = conn.cursor()
-                cursor.execute(count_query, (symbols, start_date, end_date))
-                total_records = cursor.fetchone()[0]
-                cursor.close()
+                result = conn.execute(count_query, {
+                    'symbols': symbols,
+                    'start_date': start_date,
+                    'end_date': end_date
+                })
+                total_records = result.scalar()
                 
                 self.logger.info(f"Загрузка {total_records:,} записей...")
                 
@@ -204,10 +217,12 @@ class CryptoDataLoader:
                     ):
                         chunks.append(chunk)
                         pbar.update(len(chunk))
-            finally:
-                conn.close()
             
             df = pd.concat(chunks, ignore_index=True)
+            
+            # Валидация загруженных данных
+            required_columns = ['id', 'symbol', 'datetime', 'open', 'high', 'low', 'close', 'volume']
+            validate_dataframe(df, required_columns, "загруженные рыночные данные")
             
             # Обработка типов данных
             df['datetime'] = pd.to_datetime(df['datetime'])

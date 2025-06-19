@@ -17,6 +17,29 @@ except ImportError:
     EINOPS_AVAILABLE = False
     print("Warning: einops not available. Using manual tensor operations.")
 
+
+# Функции для ручной перестановки размерностей (fallback для einops)
+def manual_rearrange_b_n_c_p_to_bc_n_p(tensor):
+    """Ручная реализация rearrange('b n c p -> (b c) n p')"""
+    b, n, c, p = tensor.shape
+    # (B, N, C, P) -> (B, C, N, P) -> (B*C, N, P)
+    return tensor.permute(0, 2, 1, 3).contiguous().view(b * c, n, p)
+
+
+def manual_rearrange_bc_t_to_b_t_c(tensor, n_vars):
+    """Ручная реализация rearrange('(b c) t -> b t c', c=n_vars)"""
+    bc, t = tensor.shape
+    b = bc // n_vars
+    c = n_vars
+    # (B*C, T) -> (B, C, T) -> (B, T, C)
+    return tensor.view(b, c, t).transpose(1, 2)
+
+
+def manual_repeat_t_n(tensor, n):
+    """Ручная реализация repeat('t -> t n', n=n)"""
+    # tensor shape: (T,) -> (T, N)
+    return tensor.unsqueeze(1).expand(-1, n)
+
 class PositionalEncoding(nn.Module):
     """Позиционное кодирование для трансформера"""
     
@@ -71,8 +94,7 @@ class PatchEmbedding(nn.Module):
             patches = rearrange(patches, 'b n c p -> (b c) n p')
         else:
             # Ручная перестановка: (B, num_patches, C, patch_len) -> (B*C, num_patches, patch_len)
-            patches = patches.permute(0, 2, 1, 3).contiguous()  # (B, C, num_patches, patch_len)
-            patches = patches.view(B * C, num_patches, self.patch_len)  # (B*C, num_patches, patch_len)
+            patches = manual_rearrange_b_n_c_p_to_bc_n_p(patches)
         
         patches = self.proj(patches)
         patches = self.norm(patches)
@@ -103,8 +125,7 @@ class FlattenHead(nn.Module):
             x = rearrange(x, '(b n) t -> b t n', n=self.n_vars)
         else:
             # Ручная перестановка: (B*n_vars, target_window) -> (B, target_window, n_vars)
-            x = x.view(-1, self.n_vars, x.size(-1))  # (B, n_vars, target_window)
-            x = x.transpose(1, 2)  # (B, target_window, n_vars)
+            x = manual_rearrange_bc_t_to_b_t_c(x, self.n_vars)
         
         return x
 
@@ -242,8 +263,20 @@ class PatchTSTForPrediction(nn.Module):
 
 
 def create_patchtst_model(config: Dict) -> PatchTSTForPrediction:
-    """Создание модели из конфигурации"""
-    model_config = config['model']
+    """Создание модели из конфигурации с валидацией"""
+    from utils.config_validator import ModelConfig
+    
+    # Валидация конфигурации модели
+    if isinstance(config, dict):
+        model_config = config.get('model', {})
+        try:
+            # Валидация через Pydantic
+            validated_config = ModelConfig(**model_config)
+            model_config = validated_config.dict()
+        except Exception as e:
+            raise ValueError(f"Неверная конфигурация модели: {e}")
+    else:
+        model_config = config['model']
     
     n_features = model_config.get('input_size', 100)
     n_targets = model_config.get('output_size', 1)  # количество целевых переменных

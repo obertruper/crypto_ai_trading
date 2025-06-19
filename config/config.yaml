@@ -136,19 +136,27 @@ performance:
   num_workers: 4
 remote_server:
   enabled: true
-  key_path: ~/.ssh/vast_ai_key
+  # Используем SSH алиас из ~/.ssh/config вместо прямых host/port
+  ssh_alias: ${VAST_SSH_ALIAS:vast-current}  # Переменная окружения или дефолтный алиас
+  
+  # Альтернативный способ - прямое подключение (если ssh_alias не задан)
+  direct_connection:
+    host: ${VAST_HOST:114.32.64.6}
+    port: ${VAST_PORT:40134}
+    user: ${VAST_USER:root}
+    key_path: ${VAST_KEY_PATH:~/.ssh/id_rsa}
+  
+  # Порты для проброса
   ports:
     jupyter: 8888
     tensorboard: 6006
     web_ui: 8080
-  primary:
-    host: 114.32.64.6
-    port: 40134
-  proxy:
-    host: ssh3.vast.ai
-    port: 33915
+  
+  # Пути на удаленном сервере
   python_path: /opt/conda/bin/python
   remote_path: /root/crypto_ai_trading
+  
+  # Настройки синхронизации
   sync:
     exclude:
     - cache/
@@ -159,7 +167,6 @@ remote_server:
     - models_saved/
     - experiments/runs/
     - .DS_Store
-  user: root
 risk_management:
   max_concurrent_positions: 10
   max_positions_per_symbol: 1

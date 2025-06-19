@@ -161,18 +161,14 @@ echo 'Режим: '\$MODE
 echo 'Эпохи: '\$EPOCHS
 echo 'Использовать кэш: '\$USE_CACHE_ONLY
 
-# Проверяем доступность БД
-if nc -z localhost 5555 2>/dev/null; then
-    echo '✅ PostgreSQL доступен на порту 5555'
-    echo '📊 Используется подключение к БД'
+# Проверяем флаг использования кэша
+if [ "\$USE_CACHE_ONLY" = "1" ]; then
+    echo '📊 Используется кэш вместо БД'
+    python3 run_full_pipeline.py --mode \$MODE 2>&1 | tee logs/training_gpu.log
 else
-    echo '⚠️  PostgreSQL недоступен на порту 5555'
-    echo '📊 Переключаемся на использование кэша'
-    export USE_CACHE_ONLY=1
+    echo '📊 Используется подключение к БД'
+    python3 run_full_pipeline.py --mode \$MODE 2>&1 | tee logs/training_gpu.log
 fi
-
-# Запуск обучения
-python3 run_full_pipeline.py --mode \$MODE 2>&1 | tee logs/training_gpu.log
 SCRIPT
 
 # Копируем скрипт на сервер

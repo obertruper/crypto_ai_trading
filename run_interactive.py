@@ -17,6 +17,21 @@ warnings.filterwarnings('ignore')
 # Добавляем текущую директорию в путь
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Настройка логирования
+import logging
+log_dir = Path("logs/interactive")
+log_dir.mkdir(parents=True, exist_ok=True)
+log_file = log_dir / f"menu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(funcName)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, encoding='utf-8'),
+    ]
+)
+menu_logger = logging.getLogger('interactive_menu')
+
 # Импорты для интерактивного меню
 from rich.console import Console
 from rich.table import Table
@@ -35,6 +50,8 @@ class CryptoTradingMenu:
         self.console = Console()
         self.config_path = Path("config/config.yaml")
         self.config = self.load_config()
+        self.logger = menu_logger
+        self.logger.info(f"Запуск интерактивного меню. Лог файл: {log_file}")
         
     def load_config(self) -> Dict:
         """Загрузка конфигурации"""
@@ -1108,6 +1125,7 @@ for _, row in df.iterrows():
             action_table.add_row("3", "📊 Мониторинг с браузером")
             action_table.add_row("4", "📋 Проверить логи")
             action_table.add_row("5", "🔧 Настройки сервера")
+            action_table.add_row("6", "🔌 Настроить туннель БД")
             action_table.add_row("0", "Назад")
             
             self.console.print(action_table)
@@ -1115,28 +1133,40 @@ for _, row in df.iterrows():
             choice = Prompt.ask("\n[bold cyan]Выберите опцию[/bold cyan]")
             
             if choice == "1":
+                self.logger.info("GPU меню: выбрана синхронизация")
                 self.sync_to_gpu_server()
             elif choice == "2":
+                self.logger.info("GPU меню: выбран запуск обучения")
                 if not server_status['project_exists']:
                     self.console.print("\n[yellow]⚠️  Сначала нужно синхронизировать проект![/yellow]")
                     Prompt.ask("\nНажмите Enter для продолжения")
                 else:
                     self.launch_gpu_training()
             elif choice == "3":
+                self.logger.info("GPU меню: выбран мониторинг")
                 self.monitor_with_browser()
             elif choice == "4":
+                self.logger.info("GPU меню: выбраны логи")
                 self.check_gpu_logs()
             elif choice == "5":
+                self.logger.info("GPU меню: выбраны настройки")
                 self.configure_gpu_server()
+            elif choice == "6":
+                self.logger.info("GPU меню: выбран туннель БД")
+                self.setup_db_tunnel()
             elif choice == "0":
+                self.logger.info("GPU меню: выход")
                 break
     
     def _check_server_status(self):
         """Проверка состояния сервера"""
         try:
+            # Получаем SSH алиас из конфига или переменной окружения
+            ssh_alias = os.environ.get('VAST_SSH_ALIAS', 'vast-current')
+            
             # Проверяем доступность сервера
             result = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=5", "-p", "40134", "root@114.32.64.6", 
+                ["ssh", "-o", "ConnectTimeout=5", ssh_alias, 
                  "test -d /root/crypto_ai_trading && echo 'PROJECT_EXISTS' || echo 'NO_PROJECT'"],
                 capture_output=True,
                 text=True
@@ -1175,10 +1205,13 @@ for _, row in df.iterrows():
             Prompt.ask("\nНажмите Enter для продолжения")
             return
         
+        # Получаем SSH алиас
+        ssh_alias = os.environ.get('VAST_SSH_ALIAS', 'vast-current')
+        
         # Проверяем наличие кэша на сервере
         with self.console.status("[cyan]Проверка данных на сервере...[/cyan]"):
             result = subprocess.run(
-                ["ssh", "-p", "40134", "root@114.32.64.6", 
+                ["ssh", ssh_alias, 
                  "test -f /root/crypto_ai_trading/cache/features_cache.pkl && echo 'EXISTS' || echo 'NOT_EXISTS'"],
                 capture_output=True,
                 text=True
@@ -1189,12 +1222,12 @@ for _, row in df.iterrows():
             self.console.print(f"[dim]Размер файла: {cache_file.stat().st_size / (1024*1024):.1f} MB[/dim]")
             
             # Создаем директорию и копируем файл
-            subprocess.run(["ssh", "-p", "40134", "root@114.32.64.6", "mkdir -p /root/crypto_ai_trading/cache"])
+            subprocess.run(["ssh", ssh_alias, "mkdir -p /root/crypto_ai_trading/cache"])
             
             with Progress() as progress:
                 task = progress.add_task("[cyan]Копирование кэша...", total=100)
                 result = subprocess.run(
-                    ["scp", "-P", "40134", str(cache_file), "root@114.32.64.6:/root/crypto_ai_trading/cache/"],
+                    ["scp", str(cache_file), f"{ssh_alias}:/root/crypto_ai_trading/cache/"],
                     capture_output=True,
                     text=True
                 )
@@ -1276,57 +1309,64 @@ for _, row in df.iterrows():
     
     def monitor_with_browser(self):
         """Мониторинг с автоматическим запуском браузера"""
-        self.console.print("\n[cyan]📊 Запуск мониторинга обучения...[/cyan]")
-        
-        # Проверяем, запущен ли TensorBoard на сервере
-        self.console.print("[yellow]Проверка TensorBoard на сервере...[/yellow]")
-        
-        result = subprocess.run(
-            ["ssh", "-p", "40134", "-i", os.path.expanduser("~/.ssh/vast_ai_key"), 
-             "root@114.32.64.6", "pgrep -f tensorboard"],
-            capture_output=True
-        )
-        
-        if result.returncode != 0:
-            self.console.print("[yellow]TensorBoard не запущен. Запускаем...[/yellow]")
-            subprocess.run(
-                ["ssh", "-p", "40134", "-i", os.path.expanduser("~/.ssh/vast_ai_key"),
-                 "root@114.32.64.6", 
-                 "cd /root/crypto_ai_trading && nohup tensorboard --logdir experiments/runs --host 0.0.0.0 --port 6006 > /dev/null 2>&1 &"],
+        self.logger.info("Запуск monitor_with_browser")
+        try:
+            self.console.print("\n[cyan]📊 Запуск мониторинга обучения...[/cyan]")
+            
+            # Проверяем, запущен ли TensorBoard на сервере
+            self.console.print("[yellow]Проверка TensorBoard на сервере...[/yellow]")
+            
+            # Получаем SSH алиас
+            ssh_alias = os.environ.get('VAST_SSH_ALIAS', 'vast-current')
+            
+            result = subprocess.run(
+                ["ssh", ssh_alias, "pgrep -f tensorboard"],
                 capture_output=True
             )
-            time.sleep(2)
-        
-        # Запускаем SSH с пробросом портов
-        self.console.print("[yellow]Открываем туннель к серверу...[/yellow]")
-        
-        import threading
-        import webbrowser
-        import time
-        
-        def open_browser():
-            time.sleep(3)  # Даем время на установку туннеля
-            self.console.print("\n[green]Открываем TensorBoard в браузере...[/green]")
-            webbrowser.open('http://localhost:6006')
-        
-        # Запускаем браузер в отдельном потоке
-        browser_thread = threading.Thread(target=open_browser)
-        browser_thread.start()
-        
-        # Запускаем SSH туннель с автоматическим выбором
-        env = os.environ.copy()
-        env['VAST_CONNECTION_MODE'] = '1'  # Прямое подключение
-        
-        script_path = "scripts/connect_vast.sh"
-        if Path(script_path).exists():
-            try:
-                subprocess.run(["bash", script_path], env=env)
-            except KeyboardInterrupt:
-                self.console.print("\n[yellow]Мониторинг остановлен[/yellow]")
-            except Exception as e:
-                self.console.print(f"[red]❌ Ошибка: {e}[/red]")
-        else:
-            self.console.print(f"[red]❌ Скрипт {script_path} не найден[/red]")
+            
+            if result.returncode != 0:
+                self.console.print("[yellow]TensorBoard не запущен. Запускаем...[/yellow]")
+                subprocess.run(
+                    ["ssh", ssh_alias, 
+                     "cd /root/crypto_ai_trading && nohup tensorboard --logdir experiments/runs --host 0.0.0.0 --port 6006 > /dev/null 2>&1 &"],
+                    capture_output=True
+                )
+                time.sleep(2)
+            
+            # Запускаем SSH с пробросом портов
+            self.console.print("[yellow]Открываем туннель к серверу...[/yellow]")
+            
+            import threading
+            import webbrowser
+            import time as time_module
+            
+            def open_browser():
+                time_module.sleep(3)  # Даем время на установку туннеля
+                self.console.print("\n[green]Открываем TensorBoard в браузере...[/green]")
+                webbrowser.open('http://localhost:6006')
+            
+            # Запускаем браузер в отдельном потоке
+            browser_thread = threading.Thread(target=open_browser)
+            browser_thread.start()
+            
+            # Запускаем SSH туннель с автоматическим выбором
+            env = os.environ.copy()
+            env['VAST_CONNECTION_MODE'] = '1'  # Прямое подключение
+            
+            script_path = "scripts/connect_vast.sh"
+            if Path(script_path).exists():
+                try:
+                    subprocess.run(["bash", script_path], env=env)
+                except KeyboardInterrupt:
+                    self.console.print("\n[yellow]Мониторинг остановлен[/yellow]")
+                except Exception as e:
+                    self.console.print(f"[red]❌ Ошибка: {e}[/red]")
+            else:
+                self.console.print(f"[red]❌ Скрипт {script_path} не найден[/red]")
+                
+        except Exception as e:
+            self.logger.error(f"Ошибка в monitor_with_browser: {e}", exc_info=True)
+            self.console.print(f"[red]❌ Ошибка: {e}[/red]")
         
         Prompt.ask("\nНажмите Enter для продолжения")
     
@@ -1334,8 +1374,11 @@ for _, row in df.iterrows():
         """Проверить логи на GPU сервере"""
         self.console.print("\n[cyan]📋 Получение логов с сервера...[/cyan]")
         
+        # Получаем SSH алиас
+        ssh_alias = os.environ.get('VAST_SSH_ALIAS', 'vast-current')
+        
         result = subprocess.run(
-            ["ssh", "-p", "40134", "root@114.32.64.6", 
+            ["ssh", ssh_alias, 
              "tail -n 50 /root/crypto_ai_trading/logs/training_gpu.log 2>/dev/null || echo 'Логи не найдены'"],
             capture_output=True,
             text=True
@@ -1371,6 +1414,71 @@ for _, row in df.iterrows():
             
             self.save_config()
             self.console.print("[green]✅ Настройки сохранены[/green]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def setup_db_tunnel(self):
+        """Настройка туннеля к локальной БД"""
+        self.logger.info("Запуск setup_db_tunnel")
+        try:
+            self.console.print("\n[cyan]🔌 Настройка туннеля к локальной БД[/cyan]")
+            
+            # Проверяем, запущена ли локальная БД
+            self.console.print("[yellow]Проверка локальной PostgreSQL...[/yellow]")
+            
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            result = sock.connect_ex(('localhost', 5555))
+            sock.close()
+            
+            if result != 0:
+                self.console.print("[red]❌ PostgreSQL не запущен на порту 5555[/red]")
+                self.console.print("[yellow]Запустите БД командой:[/yellow]")
+                self.console.print("   docker-compose up -d postgres")
+                Prompt.ask("\nНажмите Enter для продолжения")
+                return
+            
+            self.console.print("[green]✅ Локальная БД доступна[/green]")
+            
+            # Проверяем существующие туннели
+            result = subprocess.run(
+                ["pgrep", "-f", "ssh.*-R.*5555"],
+                capture_output=True
+            )
+            
+            if result.returncode == 0:
+                self.console.print("[yellow]⚠️  Туннель уже существует[/yellow]")
+                if Confirm.ask("Пересоздать туннель?"):
+                    subprocess.run(["pkill", "-f", "ssh.*-R.*5555"])
+                    time.sleep(1)
+                else:
+                    Prompt.ask("\nНажмите Enter для продолжения")
+                    return
+            
+            # Запускаем скрипт настройки туннеля
+            script_path = "scripts/setup_db_tunnel.sh"
+            if Path(script_path).exists():
+                self.console.print("[yellow]🚇 Создание SSH туннеля...[/yellow]")
+                result = subprocess.run(
+                    ["bash", script_path],
+                    capture_output=True,
+                    text=True
+                )
+                
+                if result.returncode == 0:
+                    self.console.print("[green]✅ Туннель успешно создан![/green]")
+                    self.console.print("\n[cyan]Теперь GPU сервер может использовать БД[/cyan]")
+                    self.console.print("При запуске обучения БД будет доступна автоматически")
+                else:
+                    self.console.print("[red]❌ Ошибка создания туннеля[/red]")
+                    if result.stderr:
+                        self.console.print(f"[red]{result.stderr}[/red]")
+            else:
+                self.console.print(f"[red]❌ Скрипт {script_path} не найден[/red]")
+                
+        except Exception as e:
+            self.logger.error(f"Ошибка в setup_db_tunnel: {e}", exc_info=True)
+            self.console.print(f"[red]❌ Ошибка: {e}[/red]")
         
         Prompt.ask("\nНажмите Enter для продолжения")
     
@@ -1539,15 +1647,24 @@ for _, row in df.iterrows():
 
 def main():
     """Точка входа"""
+    menu_logger.info("="*60)
+    menu_logger.info("Запуск Crypto AI Trading System")
+    menu_logger.info(f"Файл логов: {log_file}")
+    menu_logger.info("="*60)
+    
     try:
         menu = CryptoTradingMenu()
         menu.run()
     except KeyboardInterrupt:
+        menu_logger.info("Программа прервана пользователем")
         console.print("\n\n[yellow]Программа прервана пользователем[/yellow]")
     except Exception as e:
+        menu_logger.error(f"Критическая ошибка: {e}", exc_info=True)
         console.print(f"\n[red]Критическая ошибка: {e}[/red]")
         import traceback
         traceback.print_exc()
+    finally:
+        menu_logger.info("Завершение работы")
 
 
 if __name__ == "__main__":
