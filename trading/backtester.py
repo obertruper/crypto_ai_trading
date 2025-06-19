@@ -181,8 +181,13 @@ class Backtester:
         if not self.signal_generator.validate_signal(signal, current_market_data):
             return
         
-        # Применение slippage и комиссий
-        execution_price = self._apply_execution_costs(signal.entry_price, signal.side)
+        # Применение slippage с учетом размера позиции
+        execution_price = self._apply_execution_costs(
+            signal.entry_price, 
+            signal.side,
+            signal.position_size if hasattr(signal, 'position_size') else 0,
+            current_market_data
+        )
         
         # Открытие позиции через risk manager
         position = self.risk_manager.open_position(

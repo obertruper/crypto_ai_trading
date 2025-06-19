@@ -2,12 +2,14 @@
 
 # Подключение к базе данных (адаптировано под вашу БД)
 database:
-  host: "localhost"
-  port: 5555
-  database: "crypto_trading"
-  user: "ruslan"
-  password: "ruslan"
+  host: ${DB_HOST:localhost}
+  port: ${DB_PORT:5555}
+  database: ${DB_NAME:crypto_trading}
+  user: ${DB_USER:ruslan}
+  password: ${DB_PASSWORD:ruslan}
   table: "raw_market_data"
+  pool_size: 10
+  max_overflow: 20
 
 # Параметры данных
 data:
@@ -131,19 +133,20 @@ model:
   input_size: 100  # количество признаков
   patch_len: 16    # длина патча
   stride: 8        # шаг патча
-  context_window: 168  # входное окно (42 часа для 15-мин данных)
+  context_window: 96   # 24 часа - оптимально (для 15-мин данных)
   
   # Transformer параметры
-  d_model: 128
-  n_heads: 8
-  e_layers: 3      # encoder layers
-  d_ff: 512        # feedforward dimension
+  d_model: 256         # Увеличено для лучшего качества
+  n_heads: 16          # Увеличено количество голов
+  e_layers: 3          # encoder layers
+  d_ff: 512            # feedforward dimension
   dropout: 0.1
   activation: "gelu"
+  batch_norm: true     # Добавлена нормализация
   
   # Прогнозирование
-  pred_len: 4      # прогноз на 4 шага (1 час)
-  individual: false # channel-independent
+  pred_len: 4          # прогноз на 4 шага (1 час)
+  individual: false    # channel-independent
   
   # Обучение
   learning_rate: 0.001
@@ -156,29 +159,49 @@ model:
 risk_management:
   # Основные параметры
   risk_reward_ratio: 3.0
-  stop_loss_pct: 1.1      # 1.1% стоп-лосс (как в вашем проекте)
-  take_profit_targets:    # Цели прибыли
-    - 1.2   # Первый уровень 20%
-    - 2.4   # Второй уровень 30%
-    - 3.5   # Третий уровень 30%
-    - 5.8   # Полный TP
+  stop_loss_pct: 2.0                    # Реалистично для крипто
+  take_profit_targets: [1.5, 2.5, 4.0]  # Меньше уровней, выше достижимость
+  partial_close_sizes: [40, 40, 20]     # Больше прибыли на первых уровнях (в %)
   
   # Размер позиции
   position_sizing:
-    method: "volatility_based"  # на основе ATR
-    max_position_pct: 10.0      # макс 10% портфеля
-    risk_per_trade_pct: 1.0     # риск 1% на сделку
+    method: "kelly_criterion"           # Математически обоснованный
+    max_risk_per_trade: 0.5             # Консервативный подход
+    correlation_adjustment: true        # Учет корреляций
+    max_position_pct: 10.0              # макс 10% портфеля
   
   # Диверсификация
   max_concurrent_positions: 10
   max_positions_per_symbol: 1
   
-  # Корректировка для разных типов монет
+  # Динамические параметры на основе волатильности
   volatility_adjustment:
+    high_vol_threshold: 3.0
+    low_vol_threshold: 1.5
+    high_vol_multipliers: [1.8, 3.0, 5.0]
+    low_vol_multipliers: [1.2, 2.0, 3.0]
     major_coins: ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
     major_risk_multiplier: 1.0
     altcoin_risk_multiplier: 0.7
     meme_coin_risk_multiplier: 0.5
+
+# Параметры торговли
+trading:
+  min_confidence_threshold: 0.65        # Торговать только при высокой уверенности
+  max_positions: 5
+  max_daily_trades: 15                  # Лимит для контроля качества
+  rebalance_interval: "1h"
+  multiframe_confirmation: true         # Требовать подтверждения от старших ТФ
+  
+# Параметры Bybit
+bybit:
+  fees:
+    maker: 0.0002                       # 0.02%
+    taker: 0.00055                      # 0.055%
+    funding_rate: 0.0001                # ~0.01% каждые 8 часов
+  slippage:
+    base: 0.0005                        # 0.05% базовый slippage
+    market_impact_threshold: 0.01       # 1% от часового объема
 
 # Параметры бэктестирования
 backtesting:

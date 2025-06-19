@@ -7,11 +7,14 @@ import numpy as np
 from typing import List, Optional, Tuple, Dict
 from datetime import datetime
 import psycopg2
+from psycopg2 import pool
 from sqlalchemy import create_engine
 import pickle
 from pathlib import Path
 import hashlib
 from tqdm import tqdm
+from contextlib import contextmanager
+import os
 
 from utils.logger import get_logger
 
@@ -71,10 +74,14 @@ class CryptoDataLoader:
                   symbols: Optional[List[str]] = None,
                   start_date: Optional[str] = None,
                   end_date: Optional[str] = None) -> pd.DataFrame:
-        """Загрузка данных из БД"""
+        """Загрузка данных из БД с валидацией"""
         symbols = symbols or self.config['data']['symbols']
         start_date = start_date or self.config['data']['start_date']
         end_date = end_date or self.config['data']['end_date']
+        
+        # Валидация параметров
+        self._validate_symbols(symbols)
+        self._validate_dates(start_date, end_date)
         
         cache_key = self._get_cache_key(symbols, start_date, end_date)
         cached_data = self._load_from_cache(cache_key)
@@ -306,3 +313,62 @@ class CryptoDataLoader:
             resampled_dfs.append(resampled)
         
         return pd.concat(resampled_dfs, ignore_index=True)
+    
+    def _validate_symbols(self, symbols: List[str]):
+        """Валидация символов"""
+        if not symbols:
+            raise ValueError("Список символов не может быть пустым")
+        
+        for symbol in symbols:
+            if not isinstance(symbol, str) or not symbol.replace('USDT', '').replace('1000', '').isalnum():
+                raise ValueError(f"Некорректный символ: {symbol}")
+    
+    def _validate_dates(self, start_date: str, end_date: str):
+        """Валидация дат"""
+        try:
+            start = pd.to_datetime(start_date)
+            end = pd.to_datetime(end_date)
+            if start >= end:
+                raise ValueError("Начальная дата должна быть раньше конечной")
+        except Exception as e:
+            raise ValueError(f"Некорректный формат даты: {e}")
+    
+    def get_data_completeness(self, symbols: List[str], start_date: str, end_date: str) -> Dict:
+        """Проверка полноты данных"""
+        query = """
+        SELECT 
+            symbol,
+            COUNT(*) as actual_records,
+            MIN(datetime) as first_record,
+            MAX(datetime) as last_record
+        FROM raw_market_data 
+        WHERE symbol = ANY(%(symbols)s)
+        AND datetime BETWEEN %(start_date)s AND %(end_date)s
+        AND market_type = 'futures'
+        GROUP BY symbol
+        """
+        
+        with self.engine.connect() as conn:
+            result = conn.execute(query, {
+                'symbols': symbols,
+                'start_date': start_date,
+                'end_date': end_date
+            })
+            
+            completeness = {}
+            for row in result:
+                symbol, actual, first, last = row
+                
+                # Вычисляем ожидаемое количество записей (15-минутные интервалы)
+                time_diff = (last - first).total_seconds()
+                expected_records = int(time_diff / (15 * 60)) + 1
+                
+                completeness[symbol] = {
+                    'actual_records': actual,
+                    'expected_records': expected_records,
+                    'completeness_pct': (actual / expected_records) * 100 if expected_records > 0 else 0,
+                    'first_record': first,
+                    'last_record': last
+                }
+        
+        return completeness

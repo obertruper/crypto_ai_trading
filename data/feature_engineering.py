@@ -7,7 +7,7 @@ import numpy as np
 import ta
 from typing import Dict, List, Tuple, Optional
 from scipy import stats
-from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -22,10 +22,13 @@ class FeatureEngineer:
         self.feature_config = config['features']
         self.scalers = {}
         
-    def create_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Создание всех признаков для датасета"""
+    def create_features(self, df: pd.DataFrame, train_end_date: Optional[str] = None) -> pd.DataFrame:
+        """Создание всех признаков для датасета с walk-forward валидацией"""
         self.logger.start_stage("feature_engineering", 
                                symbols=df['symbol'].nunique())
+        
+        # Валидация данных
+        self._validate_data(df)
         
         featured_dfs = []
         
@@ -43,7 +46,12 @@ class FeatureEngineer:
         
         result_df = pd.concat(featured_dfs, ignore_index=True)
         result_df = self._create_cross_asset_features(result_df)
-        result_df = self._normalize_features(result_df)
+        
+        # Walk-forward нормализация если указана дата
+        if train_end_date:
+            result_df = self._normalize_walk_forward(result_df, train_end_date)
+        else:
+            result_df = self._normalize_features(result_df)
         
         self._log_feature_statistics(result_df)
         
@@ -52,8 +60,31 @@ class FeatureEngineer:
         
         return result_df
     
+    def _validate_data(self, df: pd.DataFrame):
+        """Валидация целостности данных"""
+        # Проверка на отсутствующие значения
+        if df.isnull().any().any():
+            self.logger.warning("Обнаружены пропущенные значения в данных")
+            
+        # Проверка на аномальные цены
+        price_changes = df.groupby('symbol')['close'].pct_change()
+        extreme_moves = abs(price_changes) > 0.15  # >15% за 15 минут
+        
+        if extreme_moves.sum() > 0:
+            self.logger.warning(f"Обнаружено {extreme_moves.sum()} экстремальных движений цены")
+            
+        # Проверка временных гэпов
+        for symbol in df['symbol'].unique():
+            symbol_data = df[df['symbol'] == symbol]
+            time_diff = symbol_data['datetime'].diff()
+            expected_diff = pd.Timedelta('15 minutes')
+            large_gaps = time_diff > expected_diff * 2
+            
+            if large_gaps.sum() > 0:
+                self.logger.warning(f"Символ {symbol}: обнаружено {large_gaps.sum()} больших временных разрывов")
+    
     def _create_basic_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Базовые признаки из OHLCV данных"""
+        """Базовые признаки из OHLCV данных без look-ahead bias"""
         df['returns'] = np.log(df['close'] / df['close'].shift(1))
         
         # Доходности за разные периоды
@@ -72,9 +103,9 @@ class FeatureEngineer:
             (df['high'] - df['low'] + 1e-10)
         )
         
-        # Объемные соотношения
-        df['volume_ratio'] = df['volume'] / df['volume'].rolling(20).mean()
-        df['turnover_ratio'] = df['turnover'] / df['turnover'].rolling(20).mean()
+        # Объемные соотношения с использованием только исторических данных
+        df['volume_ratio'] = df['volume'] / df['volume'].rolling(20, min_periods=20).mean()
+        df['turnover_ratio'] = df['turnover'] / df['turnover'].rolling(20, min_periods=20).mean()
         
         # VWAP
         df['vwap'] = df['turnover'] / (df['volume'] + 1e-10)
@@ -364,18 +395,23 @@ class FeatureEngineer:
         return df
     
     def _normalize_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Нормализация признаков"""
+        """Нормализация признаков (для обратной совместимости)"""
         self.logger.info("Нормализация признаков...")
         
         # Столбцы для исключения из нормализации
         exclude_cols = [
             'id', 'symbol', 'timestamp', 'datetime', 'sector',
-            'open', 'high', 'low', 'close'
+            'open', 'high', 'low', 'close', 'volume', 'turnover'
         ]
         
         # Целевые переменные
         target_cols = [col for col in df.columns if col.startswith(('target_', 'future_', 'optimal_'))]
         exclude_cols.extend(target_cols)
+        
+        # Временные колонки
+        time_cols = ['hour', 'minute', 'dayofweek', 'day', 'month', 'is_weekend',
+                    'asian_session', 'european_session', 'american_session', 'session_overlap']
+        exclude_cols.extend(time_cols)
         
         # Определяем признаки для нормализации
         feature_cols = [col for col in df.columns if col not in exclude_cols]
@@ -394,6 +430,54 @@ class FeatureEngineer:
                 df.loc[valid_mask, feature_cols] = self.scalers[symbol].fit_transform(
                     df.loc[valid_mask, feature_cols]
                 )
+        
+        return df
+    
+    def _normalize_walk_forward(self, df: pd.DataFrame, train_end_date: str) -> pd.DataFrame:
+        """Walk-forward нормализация без data leakage"""
+        self.logger.info(f"Walk-forward нормализация до {train_end_date}...")
+        
+        # Столбцы для исключения из нормализации
+        exclude_cols = [
+            'id', 'symbol', 'timestamp', 'datetime', 'sector',
+            'open', 'high', 'low', 'close', 'volume', 'turnover'
+        ]
+        
+        # Целевые переменные
+        target_cols = [col for col in df.columns if col.startswith(('target_', 'future_', 'optimal_'))]
+        exclude_cols.extend(target_cols)
+        
+        # Временные колонки
+        time_cols = ['hour', 'minute', 'dayofweek', 'day', 'month', 'is_weekend',
+                    'asian_session', 'european_session', 'american_session', 'session_overlap']
+        exclude_cols.extend(time_cols)
+        
+        # Определяем признаки для нормализации
+        feature_cols = [col for col in df.columns if col not in exclude_cols]
+        
+        # Маска для обучающих данных
+        train_mask = df['datetime'] <= pd.to_datetime(train_end_date)
+        
+        # Нормализация по символам
+        for symbol in df['symbol'].unique():
+            symbol_mask = df['symbol'] == symbol
+            train_symbol_mask = symbol_mask & train_mask
+            
+            if train_symbol_mask.sum() > 0:
+                if symbol not in self.scalers:
+                    self.scalers[symbol] = StandardScaler()
+                
+                # Обучаем scaler только на train данных
+                train_data = df.loc[train_symbol_mask, feature_cols].dropna()
+                if len(train_data) > 0:
+                    self.scalers[symbol].fit(train_data)
+                    
+                    # Применяем ко всем данным символа
+                    valid_mask = symbol_mask & df[feature_cols].notna().all(axis=1)
+                    if valid_mask.sum() > 0:
+                        df.loc[valid_mask, feature_cols] = self.scalers[symbol].transform(
+                            df.loc[valid_mask, feature_cols]
+                        )
         
         return df
     

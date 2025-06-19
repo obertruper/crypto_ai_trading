@@ -48,10 +48,11 @@ class RiskManager:
     def __init__(self, config: Dict):
         self.config = config
         self.risk_config = config['risk_management']
+        self.bybit_config = config.get('bybit', {})
         self.logger = get_logger("RiskManager")
         
         # Параметры риска
-        self.max_risk_per_trade = self.risk_config['risk_per_trade_pct'] / 100
+        self.max_risk_per_trade = self.risk_config['position_sizing'].get('max_risk_per_trade', 0.5) / 100
         self.max_portfolio_risk = self.risk_config.get('max_portfolio_risk_pct', 10) / 100
         self.max_position_size = self.risk_config['position_sizing']['max_position_pct'] / 100
         self.max_concurrent_positions = self.risk_config['max_concurrent_positions']
@@ -66,47 +67,59 @@ class RiskManager:
         # Корректировки для разных типов активов
         self.volatility_adjustments = self.risk_config['volatility_adjustment']
         
+        # Матрица корреляций для управления риском портфеля
+        self.correlation_matrix = None
+        
     def calculate_position_size(self, 
                               symbol: str, 
                               entry_price: float, 
                               stop_loss: float, 
                               atr_value: float,
-                              confidence: float = 1.0) -> float:
-        """Расчет размера позиции на основе волатильности и риска"""
+                              confidence: float = 1.0,
+                              current_volatility: float = 2.5) -> float:
+        """Динамический расчет размера позиции с Kelly Criterion"""
         
-        # Базовый риск на сделку
-        base_risk = self.max_risk_per_trade * self.current_capital
+        # 1. Базовый размер по Kelly Criterion
+        win_rate = confidence  # Используем уверенность модели как винрейт
+        avg_win = self._get_dynamic_tp_target(current_volatility)
+        avg_loss = self._get_dynamic_sl_target(current_volatility)
         
-        # Корректировка на тип актива
+        kelly_fraction = self._calculate_kelly_fraction(win_rate, avg_win, avg_loss)
+        
+        # 2. Коррекция на волатильность
+        volatility_adjustment = self._get_volatility_adjustment(current_volatility)
+        
+        # 3. Коррекция на корреляции
+        correlation_adjustment = self._get_correlation_adjustment(symbol)
+        
+        # 4. Коррекция на тип актива
         risk_multiplier = self._get_risk_multiplier(symbol)
-        adjusted_risk = base_risk * risk_multiplier
         
-        # Корректировка на уверенность модели
-        confidence_adjusted_risk = adjusted_risk * confidence
+        # 5. Финальный расчет
+        max_risk_amount = self.current_capital * self.max_risk_per_trade
+        kelly_amount = self.current_capital * kelly_fraction
         
-        # Размер позиции на основе стоп-лосса
-        risk_per_unit = abs(entry_price - stop_loss)
-        position_size_by_sl = confidence_adjusted_risk / risk_per_unit
+        # Берем минимум для безопасности
+        risk_amount = min(max_risk_amount, kelly_amount)
         
-        # Размер позиции на основе ATR (волатильность)
-        atr_multiplier = 2.0  # Стандартный множитель ATR
-        position_size_by_atr = confidence_adjusted_risk / (atr_value * atr_multiplier)
+        # Применяем коррекции
+        final_risk_amount = risk_amount * volatility_adjustment * correlation_adjustment * risk_multiplier
         
-        # Берем минимальный из двух размеров
-        position_size = min(position_size_by_sl, position_size_by_atr)
+        # Конвертируем в размер позиции
+        stop_loss_pct = self._get_dynamic_sl_target(current_volatility)
+        position_size_usd = final_risk_amount / (stop_loss_pct / 100)
+        position_size = position_size_usd / entry_price
         
         # Ограничение по максимальному размеру позиции
         max_position_value = self.current_capital * self.max_position_size
         max_position_size = max_position_value / entry_price
-        
         position_size = min(position_size, max_position_size)
         
         self.logger.debug(
             f"Расчет позиции {symbol}: "
-            f"базовый_риск={base_risk:.2f}, "
-            f"скорр_риск={confidence_adjusted_risk:.2f}, "
-            f"размер_по_SL={position_size_by_sl:.4f}, "
-            f"размер_по_ATR={position_size_by_atr:.4f}, "
+            f"Kelly={kelly_fraction:.3f}, "
+            f"Vol_adj={volatility_adjustment:.3f}, "
+            f"Corr_adj={correlation_adjustment:.3f}, "
             f"финальный_размер={position_size:.4f}"
         )
         
@@ -241,8 +254,9 @@ class RiskManager:
         if not position.take_profits:
             return actions
         
-        # Конфигурация частичных закрытий
-        tp_percentages = [0.2, 0.3, 0.3, 0.2]  # 20%, 30%, 30%, 20%
+        # Конфигурация частичных закрытий из конфига
+        partial_sizes = self.risk_config.get('partial_close_sizes', [40, 40, 20])
+        tp_percentages = [size / 100 for size in partial_sizes]
         
         for i, tp_price in enumerate(position.take_profits[:]):
             if position.side == 'long' and current_price >= tp_price:
@@ -289,13 +303,17 @@ class RiskManager:
         return actions
     
     def _update_trailing_stop(self, position: Position, current_price: float):
-        """Обновление trailing stop loss"""
+        """Обновление trailing stop loss с учетом волатильности"""
         if position.side == 'long':
             # Trailing stop для long позиций
-            unrealized_profit_pct = (current_price - position.entry_price) / position.entry_price
+            unrealized_profit_pct = (current_price - position.entry_price) / position.entry_price * 100
             
-            if unrealized_profit_pct > 0.02:  # Если прибыль > 2%
-                new_stop = current_price * 0.99  # Trailing на 1%
+            # Динамический trailing stop на основе ATR
+            trailing_distance = position.atr_value * 2  # 2 ATR
+            trailing_pct = trailing_distance / current_price
+            
+            if unrealized_profit_pct > 1.5:  # Если прибыль > 1.5%
+                new_stop = current_price * (1 - trailing_pct)
                 if new_stop > position.stop_loss:
                     old_stop = position.stop_loss
                     position.stop_loss = new_stop
@@ -440,6 +458,106 @@ class RiskManager:
         
         return gross_profit / gross_loss if gross_loss > 0 else 0
     
+    def _calculate_kelly_fraction(self, win_rate: float, avg_win: float, avg_loss: float) -> float:
+        """Kelly Criterion: f* = (bp - q) / b"""
+        if avg_loss <= 0:
+            return 0.0
+            
+        b = avg_win / avg_loss  # Соотношение выигрыша к проигрышу
+        p = win_rate  # Вероятность выигрыша
+        q = 1 - p     # Вероятность проигрыша
+        
+        kelly = (b * p - q) / b
+        
+        # Ограничиваем Kelly до разумных пределов
+        return max(0.0, min(kelly, 0.25))  # Максимум 25% капитала
+    
+    def _get_dynamic_tp_target(self, volatility: float) -> float:
+        """Динамические TP цели на основе волатильности"""
+        vol_config = self.risk_config['volatility_adjustment']
+        
+        if volatility >= vol_config['high_vol_threshold']:
+            return np.mean(vol_config['high_vol_multipliers'])
+        elif volatility <= vol_config['low_vol_threshold']:
+            return np.mean(vol_config['low_vol_multipliers'])
+        else:
+            return np.mean(self.risk_config['take_profit_targets'])
+    
+    def _get_dynamic_sl_target(self, volatility: float) -> float:
+        """Динамический SL на основе волатильности"""
+        base_sl = self.risk_config['stop_loss_pct']
+        
+        # Увеличиваем SL пропорционально волатильности
+        if volatility >= 3.0:
+            return base_sl * 1.25  # +25% в высокой волатильности
+        elif volatility <= 1.5:
+            return base_sl * 0.9   # -10% в низкой волатильности
+        else:
+            return base_sl
+    
+    def _get_volatility_adjustment(self, volatility: float) -> float:
+        """Коррекция размера позиции на волатильность"""
+        # В высокой волатильности уменьшаем размер позиции
+        if volatility >= 4.0:
+            return 0.5  # Уменьшаем на 50%
+        elif volatility >= 3.0:
+            return 0.75  # Уменьшаем на 25%
+        elif volatility <= 1.0:
+            return 1.2   # Увеличиваем на 20%
+        else:
+            return 1.0
+    
+    def _get_correlation_adjustment(self, symbol: str) -> float:
+        """Коррекция на основе корреляций с открытыми позициями"""
+        if not self.active_positions or not self.config.get('position_sizing', {}).get('correlation_adjustment', False):
+            return 1.0
+        
+        total_correlation_risk = 0.0
+        
+        for open_symbol, position in self.active_positions.items():
+            if open_symbol != symbol:
+                correlation = self._get_correlation(symbol, open_symbol)
+                position_weight = position.position_value / self.current_capital
+                correlation_risk = abs(correlation) * position_weight
+                total_correlation_risk += correlation_risk
+        
+        # Уменьшаем размер позиции при высоких корреляциях
+        adjustment = max(0.3, 1.0 - total_correlation_risk * 2)
+        
+        return adjustment
+    
+    def _get_correlation(self, symbol1: str, symbol2: str) -> float:
+        """Получение корреляции между символами"""
+        if self.correlation_matrix is None:
+            return 0.0  # По умолчанию, если нет данных
+            
+        try:
+            return self.correlation_matrix.loc[symbol1, symbol2]
+        except (KeyError, AttributeError):
+            return 0.0
+    
+    def update_correlation_matrix(self, market_data: pd.DataFrame):
+        """Обновление матрицы корреляций"""
+        self.logger.info("Обновление матрицы корреляций...")
+        
+        # Pivot данные для расчета корреляций
+        pivot_data = market_data.pivot(
+            index='datetime', 
+            columns='symbol', 
+            values='returns'
+        )
+        
+        # Расчет rolling корреляций (за последние 20 дней)
+        window = 96 * 20  # 20 дней * 96 периодов в день
+        self.correlation_matrix = pivot_data.rolling(window).corr()
+        
+        # Берем последнюю корреляционную матрицу
+        if not self.correlation_matrix.empty:
+            self.correlation_matrix = self.correlation_matrix.iloc[-len(pivot_data.columns):]
+            self.correlation_matrix.index = pivot_data.columns
+            
+        self.logger.info("Матрица корреляций обновлена")
+    
     def get_portfolio_summary(self) -> Dict:
         """Получение сводки по портфелю"""
         metrics = self.get_risk_metrics()
@@ -454,5 +572,26 @@ class RiskManager:
             'sharpe_ratio': metrics.sharpe_ratio,
             'win_rate': metrics.win_rate,
             'profit_factor': metrics.profit_factor,
-            'total_trades': len(self.closed_positions)
+            'total_trades': len(self.closed_positions),
+            'correlation_risk': self._calculate_portfolio_correlation_risk()
         }
+    
+    def _calculate_portfolio_correlation_risk(self) -> float:
+        """Расчет корреляционного риска портфеля"""
+        if len(self.active_positions) < 2 or self.correlation_matrix is None:
+            return 0.0
+        
+        symbols = list(self.active_positions.keys())
+        total_correlation = 0.0
+        pairs_count = 0
+        
+        for i, symbol1 in enumerate(symbols):
+            for symbol2 in symbols[i+1:]:
+                correlation = self._get_correlation(symbol1, symbol2)
+                weight1 = self.active_positions[symbol1].position_value / self.current_capital
+                weight2 = self.active_positions[symbol2].position_value / self.current_capital
+                
+                total_correlation += abs(correlation) * weight1 * weight2
+                pairs_count += 1
+        
+        return total_correlation / pairs_count if pairs_count > 0 else 0.0
