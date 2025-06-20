@@ -17,33 +17,33 @@ if [ -n "$VAST_CONNECTION_MODE" ]; then
 else
     # Интерактивный выбор
     echo -e "\n${YELLOW}Выберите способ подключения:${NC}"
-    echo "1) Прямое подключение (114.32.64.6:40134)"
-    echo "2) Через прокси (ssh3.vast.ai:33915)"
+    echo "1) Прямое подключение (184.98.25.179:41575)"
+    echo "2) Через прокси (ssh8.vast.ai:13641)"
     echo -n "Выбор (1/2): "
     read choice
 fi
 
 if [ "$choice" = "1" ]; then
-    HOST="114.32.64.6"
-    PORT="40134"
+    HOST="184.98.25.179"
+    PORT="41575"
 else
-    HOST="ssh3.vast.ai"
-    PORT="33915"
+    HOST="ssh8.vast.ai"
+    PORT="13641"
 fi
 
-# Проверка SSH ключа
-KEY_PATH="$HOME/.ssh/vast_ai_key"
+# Используем стандартный ключ id_rsa
+KEY_PATH="$HOME/.ssh/id_rsa"
 if [ ! -f "$KEY_PATH" ]; then
-    echo -e "${YELLOW}⚠️  SSH ключ не найден в $KEY_PATH${NC}"
-    echo "Создайте файл и вставьте ваш приватный ключ:"
-    echo "nano $KEY_PATH"
-    echo "chmod 600 $KEY_PATH"
+    echo -e "${YELLOW}⚠️  SSH ключ не найден: $KEY_PATH${NC}"
+    echo "Убедитесь, что у вас есть SSH ключ"
     exit 1
 fi
 
 # SSH команда с пробросом портов
 SSH_CMD="ssh -p $PORT root@$HOST"
 SSH_CMD="$SSH_CMD -i $KEY_PATH"
+SSH_CMD="$SSH_CMD -o StrictHostKeyChecking=no"
+SSH_CMD="$SSH_CMD -o UserKnownHostsFile=/dev/null"
 SSH_CMD="$SSH_CMD -L 8080:localhost:8080"  # Web UI
 SSH_CMD="$SSH_CMD -L 6006:localhost:6006"  # TensorBoard (Caddy)
 SSH_CMD="$SSH_CMD -L 6007:localhost:6007"  # TensorBoard (наш)

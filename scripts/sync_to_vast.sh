@@ -10,21 +10,27 @@ NC='\033[0m'
 echo -e "${BLUE}🔄 Синхронизация проекта с Vast.ai${NC}"
 
 # Параметры из конфига (можно переопределить)
-HOST="114.32.64.6"
-PORT="40134"
+if [ "$VAST_CONNECTION_MODE" = "2" ]; then
+    # Прокси подключение
+    HOST="ssh8.vast.ai"
+    PORT="13641"
+else
+    # Прямое подключение
+    HOST="184.98.25.179"
+    PORT="41575"
+fi
+
 REMOTE_PATH="/root/crypto_ai_trading"
-KEY_PATH="$HOME/.ssh/vast_ai_key"
+# Используем стандартный ключ id_rsa, так как он работает
+KEY_PATH="$HOME/.ssh/id_rsa"
 
 # Проверка ключа
 if [ ! -f "$KEY_PATH" ]; then
-    echo -e "${YELLOW}⚠️  SSH ключ не найден: $KEY_PATH${NC}"
-    echo -e "Попробуем использовать id_rsa..."
-    KEY_PATH="$HOME/.ssh/id_rsa"
-    if [ ! -f "$KEY_PATH" ]; then
-        echo -e "${RED}❌ SSH ключ не найден${NC}"
-        exit 1
-    fi
+    echo -e "${RED}❌ SSH ключ не найден: $KEY_PATH${NC}"
+    exit 1
 fi
+
+echo -e "${GREEN}✅ Используется SSH ключ: $KEY_PATH${NC}"
 
 # Исключения для rsync
 EXCLUDES=(
@@ -43,11 +49,11 @@ EXCLUDES=(
 echo -e "${YELLOW}📤 Загрузка файлов...${NC}"
 
 # Создание директории на сервере
-ssh -p $PORT -i $KEY_PATH root@$HOST "mkdir -p $REMOTE_PATH"
+ssh -p $PORT -i $KEY_PATH -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@$HOST "mkdir -p $REMOTE_PATH"
 
 # Синхронизация
 rsync -avzP \
-    -e "ssh -p $PORT -i $KEY_PATH" \
+    -e "ssh -p $PORT -i $KEY_PATH -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
     "${EXCLUDES[@]}" \
     ./ root@$HOST:$REMOTE_PATH/
 
@@ -60,6 +66,6 @@ echo
 
 if [ "$install_deps" = "y" ]; then
     echo -e "${YELLOW}📦 Установка зависимостей...${NC}"
-    ssh -p $PORT -i $KEY_PATH root@$HOST "cd $REMOTE_PATH && pip install -r requirements.txt"
+    ssh -p $PORT -i $KEY_PATH -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@$HOST "cd $REMOTE_PATH && pip install -r requirements.txt"
     echo -e "${GREEN}✅ Зависимости установлены!${NC}"
 fi

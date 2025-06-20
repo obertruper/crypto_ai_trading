@@ -5,11 +5,11 @@ echo "🚀 Запуск обучения на GPU сервере..."
 
 # Синхронизация данных
 echo "📤 Синхронизация данных..."
-scp -P 40134 cache/features_cache.pkl root@114.32.64.6:/root/crypto_ai_trading/cache/
+scp -P 41575 cache/features_cache.pkl root@184.98.25.179:/root/crypto_ai_trading/cache/
 
 # Запуск обучения на сервере
 echo "🧠 Запуск обучения..."
-ssh -p 40134 root@114.32.64.6 "cd /root/crypto_ai_trading && \
+ssh -p 41575 root@184.98.25.179 "cd /root/crypto_ai_training && \
     mkdir -p experiments/runs logs models_saved && \
     pip install -q torch torchvision tensorboard pandas numpy scikit-learn && \
     python3 -c 'import torch; print(f\"GPU доступна: {torch.cuda.is_available()}\")' && \

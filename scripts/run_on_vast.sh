@@ -73,7 +73,7 @@ if [ -n "$GPU_TRAINING_MODE" ]; then
     
     case $choice in
         1)
-            MODE="demo"
+            MODE="train"  # Изменено с "demo" на "train" для запуска обучения
             ;;
         2)
             MODE="train"
@@ -82,7 +82,7 @@ if [ -n "$GPU_TRAINING_MODE" ]; then
             MODE="train"
             ;;
         *)
-            MODE="demo"
+            MODE="train"  # Изменено с "demo" на "train"
             ;;
     esac
 else
@@ -96,7 +96,7 @@ else
 
     case $choice in
         1)
-            MODE="demo"
+            MODE="train"  # Изменено с "demo" на "train" для запуска обучения
             EPOCHS=5
             ;;
         2)

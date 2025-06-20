@@ -10,8 +10,8 @@
 # Текущий активный сервер Vast.ai
 # Просто измените эту секцию при смене сервера
 Host vast-current
-    HostName YOUR_NEW_HOST       # Например: 114.32.64.6
-    Port YOUR_NEW_PORT           # Например: 40134
+    HostName YOUR_NEW_HOST       # Например: 184.98.25.179
+    Port YOUR_NEW_PORT           # Например: 41575
     User root
     IdentityFile ~/.ssh/id_rsa
     ServerAliveInterval 30
@@ -36,8 +36,8 @@ Host vast-current
 export VAST_SSH_ALIAS=vast-server1
 
 # Или прямое подключение
-export VAST_HOST=114.32.64.6
-export VAST_PORT=40134
+export VAST_HOST=184.98.25.179
+export VAST_PORT=41575
 export VAST_USER=root
 export VAST_KEY_PATH=~/.ssh/id_rsa
 ```

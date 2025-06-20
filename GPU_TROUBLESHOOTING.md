@@ -28,8 +28,8 @@ chmod 600 ~/.ssh/vast_ai_key
 nano ~/.ssh/config
 # Добавьте:
 Host vast-current
-    HostName 114.32.64.6
-    Port 40134
+    HostName 184.98.25.179
+    Port 41575
     User root
     IdentityFile ~/.ssh/id_rsa
 ```

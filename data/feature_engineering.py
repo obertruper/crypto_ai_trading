@@ -21,6 +21,37 @@ class FeatureEngineer:
         self.logger = get_logger("FeatureEngineer")
         self.feature_config = config['features']
         self.scalers = {}
+    
+    @staticmethod
+    def safe_divide(numerator: pd.Series, denominator: pd.Series, fill_value=0.0) -> pd.Series:
+        """Безопасное деление с обработкой нулей и малых значений"""
+        # Минимальное значение для знаменателя
+        min_denominator = 1e-10
+        
+        # Создаем безопасный знаменатель
+        safe_denominator = denominator.copy()
+        
+        # Заменяем нули и очень маленькие значения
+        mask_small = (safe_denominator.abs() < min_denominator)
+        safe_denominator[mask_small] = np.sign(safe_denominator[mask_small]) * min_denominator
+        safe_denominator[safe_denominator == 0] = min_denominator  # Для точных нулей
+        
+        # Выполняем деление
+        result = numerator / safe_denominator
+        
+        # Обрабатываем inf и nan
+        # Если fill_value - это Series, используем другой подход
+        if isinstance(fill_value, pd.Series):
+            # Находим позиции с inf и заменяем их соответствующими значениями из fill_value
+            inf_mask = np.isinf(result)
+            result.loc[inf_mask] = fill_value.loc[inf_mask]
+        else:
+            # Если fill_value - скаляр, используем стандартный replace
+            result = result.replace([np.inf, -np.inf], fill_value)
+        
+        result = result.fillna(fill_value)
+        
+        return result
         
     def create_features(self, df: pd.DataFrame, train_end_date: Optional[str] = None) -> pd.DataFrame:
         """Создание всех признаков для датасета с walk-forward валидацией"""
@@ -108,12 +139,20 @@ class FeatureEngineer:
         )
         
         # Объемные соотношения с использованием только исторических данных
-        df['volume_ratio'] = df['volume'] / df['volume'].rolling(20, min_periods=20).mean()
-        df['turnover_ratio'] = df['turnover'] / df['turnover'].rolling(20, min_periods=20).mean()
+        df['volume_ratio'] = self.safe_divide(
+            df['volume'], 
+            df['volume'].rolling(20, min_periods=20).mean(),
+            fill_value=1.0
+        )
+        df['turnover_ratio'] = self.safe_divide(
+            df['turnover'], 
+            df['turnover'].rolling(20, min_periods=20).mean(),
+            fill_value=1.0
+        )
         
         # VWAP
-        df['vwap'] = df['turnover'] / (df['volume'] + 1e-10)
-        df['close_vwap_ratio'] = df['close'] / df['vwap']
+        df['vwap'] = self.safe_divide(df['turnover'], df['volume'], fill_value=df['close'])
+        df['close_vwap_ratio'] = self.safe_divide(df['close'], df['vwap'], fill_value=1.0)
         
         return df
     
@@ -214,7 +253,7 @@ class FeatureEngineer:
     def _create_microstructure_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Признаки микроструктуры рынка"""
         # Спред high-low
-        df['hl_spread'] = (df['high'] - df['low']) / df['close']
+        df['hl_spread'] = self.safe_divide(df['high'] - df['low'], df['close'], fill_value=0.0)
         df['hl_spread_ma'] = df['hl_spread'].rolling(20).mean()
         
         # Направление цены и объем
@@ -318,6 +357,13 @@ class FeatureEngineer:
             # Принудительно заполняем оставшиеся NaN
             numeric_cols = result_df.select_dtypes(include=[np.number]).columns
             result_df[numeric_cols] = result_df[numeric_cols].fillna(0)
+        
+        # Проверка на бесконечные значения
+        numeric_cols = result_df.select_dtypes(include=[np.number]).columns
+        inf_count = np.isinf(result_df[numeric_cols]).sum().sum()
+        if inf_count > 0:
+            self.logger.warning(f"Обнаружены {inf_count} бесконечных значений, заменяем на конечные")
+            result_df[numeric_cols] = result_df[numeric_cols].replace([np.inf, -np.inf], [1e10, -1e10])
         
         self.logger.info(f"Обработка завершена. Итоговый размер: {len(result_df)} записей")
         return result_df
@@ -446,7 +492,7 @@ class FeatureEngineer:
         return df
     
     def _normalize_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Нормализация признаков (для обратной совместимости)"""
+        """ИСПРАВЛЕННАЯ нормализация признаков с обработкой inf/nan"""
         self.logger.info("Нормализация признаков...")
         
         # Столбцы для исключения из нормализации
@@ -474,13 +520,56 @@ class FeatureEngineer:
             if symbol not in self.scalers:
                 self.scalers[symbol] = RobustScaler()
             
-            # Только валидные данные (без NaN)
+            # Только валидные данные (без NaN и inf)
             valid_mask = mask & df[feature_cols].notna().all(axis=1)
             
             if valid_mask.sum() > 0:
-                df.loc[valid_mask, feature_cols] = self.scalers[symbol].fit_transform(
-                    df.loc[valid_mask, feature_cols]
-                )
+                data_to_scale = df.loc[valid_mask, feature_cols].copy()
+                
+                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Тщательная очистка inf и экстремальных значений
+                for col in feature_cols:
+                    # 1. Заменяем inf на NaN
+                    data_to_scale[col] = data_to_scale[col].replace([np.inf, -np.inf], np.nan)
+                    
+                    # 2. Заполняем NaN медианой
+                    if data_to_scale[col].isna().any():
+                        median_val = data_to_scale[col].median()
+                        if pd.isna(median_val):  # Если все значения NaN
+                            median_val = 0.0
+                        data_to_scale[col] = data_to_scale[col].fillna(median_val)
+                    
+                    # 3. Более агрессивный клиппинг экстремальных значений
+                    q05 = data_to_scale[col].quantile(0.05)  # Изменено с 0.01 на 0.05
+                    q95 = data_to_scale[col].quantile(0.95)  # Изменено с 0.99 на 0.95
+                    
+                    # Проверяем валидность квантилей
+                    if pd.isna(q05) or pd.isna(q95) or q05 == q95:
+                        # Если квантили некорректны, используем симметричное клиппинг
+                        std_val = data_to_scale[col].std()
+                        mean_val = data_to_scale[col].mean()
+                        if pd.notna(std_val) and std_val > 0:
+                            q05 = mean_val - 3 * std_val
+                            q95 = mean_val + 3 * std_val
+                        else:
+                            q05, q95 = -1, 1  # Дефолтные значения
+                    
+                    data_to_scale[col] = data_to_scale[col].clip(lower=q05, upper=q95)
+                    
+                    # 4. Финальная проверка на inf (на всякий случай)
+                    if np.isinf(data_to_scale[col]).any():
+                        self.logger.warning(f"Обнаружены inf в {col} после обработки, заменяем на 0")
+                        data_to_scale[col] = data_to_scale[col].replace([np.inf, -np.inf], 0)
+                
+                # 5. Проверяем что данные готовы для скейлинга
+                if data_to_scale.shape[0] > 0 and not data_to_scale.isna().any().any():
+                    try:
+                        df.loc[valid_mask, feature_cols] = self.scalers[symbol].fit_transform(data_to_scale)
+                    except Exception as e:
+                        self.logger.error(f"Ошибка скейлинга для {symbol}: {e}")
+                        # Если скейлинг не удался, оставляем исходные данные
+                        df.loc[valid_mask, feature_cols] = data_to_scale.fillna(0)
+                else:
+                    self.logger.warning(f"Нет валидных данных для скейлинга {symbol}")
         
         return df
     

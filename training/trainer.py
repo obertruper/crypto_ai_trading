@@ -44,6 +44,14 @@ class Trainer:
         
         self.model.to(self.device)
         
+        # Использование нескольких GPU если доступны
+        if torch.cuda.device_count() > 1 and self.device.type == 'cuda':
+            self.logger.info(f"🔥 Используется {torch.cuda.device_count()} GPU для обучения")
+            self.model = nn.DataParallel(self.model)
+            self.is_data_parallel = True
+        else:
+            self.is_data_parallel = False
+        
         # Параметры обучения
         self.epochs = config['model']['epochs']
         self.learning_rate = config['model']['learning_rate']
@@ -450,14 +458,18 @@ class Trainer:
         """Сохранение checkpoint'а"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
+        # Сохраняем правильно для DataParallel
+        model_state = self.model.module.state_dict() if self.is_data_parallel else self.model.state_dict()
+        
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model_state,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
             'val_loss': val_loss,
             'config': self.config,
-            'history': self.history
+            'history': self.history,
+            'is_data_parallel': self.is_data_parallel
         }
         
         if is_best:

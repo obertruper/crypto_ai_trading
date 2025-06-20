@@ -156,8 +156,14 @@ class PatchTSTForPrediction(nn.Module):
         self.stride = stride
         self.d_model = d_model
         
-        # Убедимся, что num_patches вычисляется правильно
-        self.num_patches = max(1, (context_window - patch_len) // stride + 1)
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Фиксированное вычисление num_patches с валидацией
+        self.num_patches = self._calculate_num_patches(context_window, patch_len, stride)
+        
+        if self.num_patches <= 0:
+            raise ValueError(
+                f"Некорректные параметры патчей: context_window={context_window}, "
+                f"patch_len={patch_len}, stride={stride} -> num_patches={self.num_patches}"
+            )
         
         # Patch embedding
         self.patch_embedding = PatchEmbedding(
@@ -200,6 +206,13 @@ class PatchTSTForPrediction(nn.Module):
         # Инициализация весов
         self._init_weights()
     
+    def _calculate_num_patches(self, context_window: int, patch_len: int, stride: int) -> int:
+        """ИСПРАВЛЕННОЕ вычисление количества патчей с валидацией"""
+        if context_window < patch_len:
+            raise ValueError(f"context_window ({context_window}) должен быть >= patch_len ({patch_len})")
+        
+        return max(1, (context_window - patch_len) // stride + 1)
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, L, N = x.shape
         
@@ -218,12 +231,12 @@ class PatchTSTForPrediction(nn.Module):
         x_patches, actual_num_patches = self.patch_embedding(x_norm)
         # x_patches: (B*N, actual_num_patches, d_model)
         
-        # Проверяем соответствие num_patches
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Строгая проверка без изменения архитектуры
         if actual_num_patches != self.num_patches:
-            print(f"Warning: Expected {self.num_patches} patches, got {actual_num_patches}")
-            # Адаптируем размеры если необходимо
-            self.num_patches = actual_num_patches
-            self.head_nf = self.d_model * self.num_patches
+            raise ValueError(
+                f"Несоответствие количества патчей: ожидалось {self.num_patches}, "
+                f"получено {actual_num_patches}. Проверьте параметры модели."
+            )
         
         # Позиционное кодирование
         x_patches = self.pos_encoding(x_patches)

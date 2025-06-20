@@ -65,7 +65,7 @@ chmod 600 ~/.ssh/vast_ai_key
 
 ### Кэш не найден на сервере
 ```bash
-scp -P 40134 -i ~/.ssh/vast_ai_key cache/features_cache.pkl root@114.32.64.6:/root/crypto_ai_trading/cache/
+scp -P 41575 -i ~/.ssh/vast_ai_key cache/features_cache.pkl root@184.98.25.179:/root/crypto_ai_trading/cache/
 ```
 
 ### TensorBoard не открывается
@@ -75,5 +75,5 @@ lsof -i :6006
 
 # Переустановить туннель
 pkill -f "ssh.*6006"
-ssh -f -N -L 6006:localhost:6006 -p 40134 -i ~/.ssh/vast_ai_key root@114.32.64.6
+ssh -f -N -L 6006:localhost:6006 -p 41575 -i ~/.ssh/vast_ai_key root@184.98.25.179
 ```

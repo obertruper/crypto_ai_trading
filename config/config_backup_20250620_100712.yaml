@@ -10,7 +10,6 @@ backtesting:
   - expectancy
   - calmar_ratio
   slippage: 0.0005
-
 bybit:
   fees:
     funding_rate: 0.0001
@@ -19,7 +18,6 @@ bybit:
   slippage:
     base: 0.0005
     market_impact_threshold: 0.01
-
 data:
   end_date: '2025-06-16'
   interval_minutes: 15
@@ -33,24 +31,21 @@ data:
     test_window: 30
     training_window: 180
     validation_window: 30
-
 database:
-  database: crypto_trading
-  host: localhost
+  database: ${DB_NAME:crypto_trading}
+  host: ${DB_HOST:localhost}
   max_overflow: 20
-  password: ruslan
+  password: ${DB_PASSWORD:ruslan}
   pool_size: 10
-  port: 5555
+  port: ${DB_PORT:5555}
   table: raw_market_data
-  user: ruslan
-
+  user: ${DB_USER:ruslan}
 ensemble:
   enabled: true
   models_count: 5
   rebalance_frequency: weekly
   voting_method: weighted_average
   weight_metric: sharpe_ratio
-
 features:
   cross_asset:
   - btc_dominance_effect
@@ -89,7 +84,6 @@ features:
   - day_of_week
   - month_of_year
   - is_weekend
-
 logging:
   handlers:
   - console
@@ -103,70 +97,39 @@ logging:
     enabled: false
     entity: your-entity
     project: crypto-ai-trading
-
-# ИСПРАВЛЕННАЯ КОНФИГУРАЦИЯ МОДЕЛИ
 model:
-  name: PatchTST
   activation: gelu
   batch_norm: true
-  batch_size: 256             # Увеличено для эффективности на GPU
-  context_window: 48          # Уменьшено с 96 для быстрого обучения
-  d_ff: 1024                  # Уменьшено с 2048
-  d_model: 256                # Уменьшено с 512
-  dropout: 0.15               # Увеличено с 0.1 для регуляризации
-  e_layers: 3                 # Уменьшено с 6 для начального обучения
-  early_stopping_patience: 15 # Увеличено с 10
+  batch_size: 128  # Увеличено для RTX 5090
+  context_window: 96
+  d_ff: 2048  # Увеличено с 512
+  d_model: 512  # Увеличено с 256
+  dropout: 0.1
+  e_layers: 6  # Увеличено с 3 слоев
+  early_stopping_patience: 10
   epochs: 100
-  gradient_clip: 0.5          # Уменьшено с 1.0 для стабильности
+  gradient_clip: 1.0
   individual: false
   input_size: 100
-  learning_rate: 0.001        # ИСПРАВЛЕНО: увеличено с 0.0002
-  n_heads: 8                  # Уменьшено с 16 (256/8 = 32 размер головы)
-  patch_len: 8                # Уменьшено с 16
+  learning_rate: 0.0002  # Увеличено для большего батча
+  n_heads: 16  # 512/16 = 32 размер головы
+  name: PatchTST
+  patch_len: 16
   pred_len: 4
-  stride: 4                   # Уменьшено с 8
-  warmup_steps: 500           # ИСПРАВЛЕНО: уменьшено с 1000
-
-# НОВАЯ КОНФИГУРАЦИЯ ОПТИМИЗАТОРА
-optimizer:
-  name: "AdamW"
-  params:
-    weight_decay: 0.01
-    betas: [0.9, 0.999]
-    eps: 0.00000001
-
-# НОВАЯ КОНФИГУРАЦИЯ ПЛАНИРОВЩИКА LR
-scheduler:
-  name: "OneCycleLR"
-  params:
-    max_lr: 0.003             # Максимальный LR
-    anneal_strategy: "cos"    # Косинусное снижение
-    div_factor: 3.0           # Начальный LR = max_lr / div_factor
-    final_div_factor: 100.0   # Финальный LR = max_lr / final_div_factor
-
-# УПРОЩЕННАЯ КОНФИГУРАЦИЯ ПОТЕРЬ
-loss:
-  name: "mse"                 # Простая MSE вместо multitask
-  params:
-    reduction: "mean"
-
+  stride: 8
+  warmup_steps: 1000
 performance:
   cache_dir: cache/
   cache_features: true
   device: cuda
   mixed_precision: true
-  num_workers: 8              # Увеличено для использования всех ядер CPU
-  data_parallel: true         # Использовать все доступные GPU
-  pin_memory: true            # Ускорение передачи данных на GPU
-  persistent_workers: true    # Держать воркеры активными между эпохами
-  prefetch_factor: 2          # Предзагрузка батчей
-
+  num_workers: 4
 remote_server:
   direct_connection:
-    host: 184.98.25.179
-    key_path: ~/.ssh/id_rsa
-    port: 41575
-    user: root
+    host: ${VAST_HOST:184.98.25.179}
+    key_path: ${VAST_KEY_PATH:~/.ssh/id_rsa}
+    port: ${VAST_PORT:41575}
+    user: ${VAST_USER:root}
   enabled: true
   ports:
     jupyter: 8888
@@ -174,7 +137,7 @@ remote_server:
     web_ui: 8080
   python_path: /opt/conda/bin/python
   remote_path: /root/crypto_ai_trading
-  ssh_alias: vast-current
+  ssh_alias: ${VAST_SSH_ALIAS:vast-current}
   sync:
     exclude:
     - cache/
@@ -185,7 +148,6 @@ remote_server:
     - models_saved/
     - experiments/runs/
     - .DS_Store
-
 risk_management:
   max_concurrent_positions: 10
   max_positions_per_symbol: 1
@@ -222,14 +184,12 @@ risk_management:
     - BNBUSDT
     major_risk_multiplier: 1.0
     meme_coin_risk_multiplier: 0.5
-
 trading:
   max_daily_trades: 15
   max_positions: 5
   min_confidence_threshold: 0.65
   multiframe_confirmation: true
   rebalance_interval: 1h
-
 validation:
   max_drawdown: 0.2
   min_sharpe_ratio: 1.5

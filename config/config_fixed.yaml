@@ -35,14 +35,14 @@ data:
     validation_window: 30
 
 database:
-  database: crypto_trading
-  host: localhost
+  database: ${DB_NAME:crypto_trading}
+  host: ${DB_HOST:localhost}
   max_overflow: 20
-  password: ruslan
+  password: ${DB_PASSWORD:ruslan}
   pool_size: 10
-  port: 5555
+  port: ${DB_PORT:5555}
   table: raw_market_data
-  user: ruslan
+  user: ${DB_USER:ruslan}
 
 ensemble:
   enabled: true
@@ -109,7 +109,7 @@ model:
   name: PatchTST
   activation: gelu
   batch_norm: true
-  batch_size: 256             # Увеличено для эффективности на GPU
+  batch_size: 64              # Уменьшено с 128 для стабильности
   context_window: 48          # Уменьшено с 96 для быстрого обучения
   d_ff: 1024                  # Уменьшено с 2048
   d_model: 256                # Уменьшено с 512
@@ -133,7 +133,7 @@ optimizer:
   params:
     weight_decay: 0.01
     betas: [0.9, 0.999]
-    eps: 0.00000001
+    eps: 1e-8
 
 # НОВАЯ КОНФИГУРАЦИЯ ПЛАНИРОВЩИКА LR
 scheduler:
@@ -155,18 +155,14 @@ performance:
   cache_features: true
   device: cuda
   mixed_precision: true
-  num_workers: 8              # Увеличено для использования всех ядер CPU
-  data_parallel: true         # Использовать все доступные GPU
-  pin_memory: true            # Ускорение передачи данных на GPU
-  persistent_workers: true    # Держать воркеры активными между эпохами
-  prefetch_factor: 2          # Предзагрузка батчей
+  num_workers: 6              # Оптимизировано для MacOS
 
 remote_server:
   direct_connection:
-    host: 184.98.25.179
-    key_path: ~/.ssh/id_rsa
-    port: 41575
-    user: root
+    host: ${VAST_HOST:184.98.25.179}
+    key_path: ${VAST_KEY_PATH:~/.ssh/id_rsa}
+    port: ${VAST_PORT:41575}
+    user: ${VAST_USER:root}
   enabled: true
   ports:
     jupyter: 8888
@@ -174,7 +170,7 @@ remote_server:
     web_ui: 8080
   python_path: /opt/conda/bin/python
   remote_path: /root/crypto_ai_trading
-  ssh_alias: vast-current
+  ssh_alias: ${VAST_SSH_ALIAS:vast-current}
   sync:
     exclude:
     - cache/

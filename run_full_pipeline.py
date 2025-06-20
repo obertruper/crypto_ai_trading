@@ -80,7 +80,7 @@ def run_data_pipeline(config: dict, logger):
     
     # Используем символы из конфига или все доступные
     symbols = config['data']['symbols']
-    if 'ALL' in symbols:
+    if symbols == 'all' or symbols == 'ALL' or (isinstance(symbols, list) and 'ALL' in symbols):
         symbols = available_symbols
     else:
         # Проверяем, что символы есть в БД
@@ -322,6 +322,10 @@ def main():
                         help='Пропустить использование кэша')
     
     args = parser.parse_args()
+    
+    # Валидация конфигурации перед загрузкой
+    from utils.config_validator_main import validate_and_exit_on_error
+    validate_and_exit_on_error(args.config)
     
     # Загрузка конфигурации
     config = load_config(args.config)

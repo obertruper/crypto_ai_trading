@@ -43,17 +43,17 @@ chmod 600 ~/.ssh/vast_ai_key
 
 ### Прямое подключение:
 ```bash
-ssh -p 40134 root@114.32.64.6 -i ~/.ssh/vast_ai_key
+ssh -p 41575 root@184.98.25.179 -i ~/.ssh/vast_ai_key
 ```
 
 ### Через прокси:
 ```bash
-ssh -p 33915 root@ssh3.vast.ai -i ~/.ssh/vast_ai_key
+ssh -p 13641 root@ssh8.vast.ai -i ~/.ssh/vast_ai_key
 ```
 
 ### С пробросом портов:
 ```bash
-ssh -p 40134 root@114.32.64.6 -i ~/.ssh/vast_ai_key \
+ssh -p 41575 root@184.98.25.179 -i ~/.ssh/vast_ai_key \
   -L 8080:localhost:8080 \
   -L 6006:localhost:6006 \
   -L 8888:localhost:8888
@@ -115,7 +115,7 @@ model:
 
 ### Зависимости не установлены:
 ```bash
-ssh -p 40134 root@114.32.64.6 -i ~/.ssh/vast_ai_key
+ssh -p 41575 root@184.98.25.179 -i ~/.ssh/vast_ai_key
 cd /root/crypto_ai_trading
 pip install -r requirements.txt
 ```

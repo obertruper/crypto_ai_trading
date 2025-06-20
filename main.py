@@ -29,13 +29,21 @@ def prepare_data(config: dict, logger):
     # Импорт здесь для избежания циклических импортов
     from data.data_loader import CryptoDataLoader
     from data.feature_engineering import FeatureEngineer
-    from data.dataset import create_datasets
+    from data.dataset import create_data_loaders, TradingDataset
     
     data_loader = CryptoDataLoader(config)
     
-    # Загружаем только первые 5 символов для тестирования
+    # Получаем список символов
+    if config['data']['symbols'] == 'all':
+        available_symbols = data_loader.get_available_symbols()
+        symbols_to_load = available_symbols[:5]  # Первые 5 для тестирования
+        logger.info(f"📊 Загружаем первые 5 символов из {len(available_symbols)}: {symbols_to_load}")
+    else:
+        symbols_to_load = config['data']['symbols'][:5]
+        logger.info(f"📊 Загружаем указанные символы: {symbols_to_load}")
+    
     raw_data = data_loader.load_data(
-        symbols=config['data']['symbols'][:5],
+        symbols=symbols_to_load,
         start_date=config['data']['start_date'],
         end_date=config['data']['end_date']
     )
@@ -51,35 +59,74 @@ def prepare_data(config: dict, logger):
     feature_engineer = FeatureEngineer(config)
     featured_data = feature_engineer.create_features(raw_data)
     
-    logger.info("✂️ Создание datasets...")
-    train_dataset, val_dataset, test_dataset = create_datasets(
-        featured_data, 
-        config,
-        train_ratio=config['data']['train_ratio'],
-        val_ratio=config['data']['val_ratio']
+    logger.info("✂️ Разделение данных на train/val/test...")
+    
+    # Разделение данных
+    train_ratio = config['data']['train_ratio']
+    val_ratio = config['data']['val_ratio']
+    test_ratio = config['data']['test_ratio']
+    
+    # Сортировка по времени для правильного разделения
+    featured_data = featured_data.sort_values(['symbol', 'datetime']).reset_index(drop=True)
+    
+    # Разделение по символам
+    train_data_list = []
+    val_data_list = []
+    test_data_list = []
+    
+    for symbol in featured_data['symbol'].unique():
+        symbol_data = featured_data[featured_data['symbol'] == symbol]
+        n = len(symbol_data)
+        
+        train_end = int(n * train_ratio)
+        val_end = int(n * (train_ratio + val_ratio))
+        
+        train_data_list.append(symbol_data.iloc[:train_end])
+        val_data_list.append(symbol_data.iloc[train_end:val_end])
+        test_data_list.append(symbol_data.iloc[val_end:])
+    
+    train_data = pd.concat(train_data_list, ignore_index=True)
+    val_data = pd.concat(val_data_list, ignore_index=True)
+    test_data = pd.concat(test_data_list, ignore_index=True)
+    
+    logger.info("🏗️ Создание datasets...")
+    
+    # Определение целевых переменных
+    target_cols = [col for col in featured_data.columns 
+                  if col.startswith(('target_', 'future_return_'))]
+    
+    # Создание DataLoader'ов
+    train_loader, val_loader, test_loader = create_data_loaders(
+        train_data=train_data,
+        val_data=val_data, 
+        test_data=test_data,
+        config=config
     )
     
     logger.info(f"📊 Размеры datasets:")
-    logger.info(f"   - Train: {len(train_dataset)} образцов")
-    logger.info(f"   - Val: {len(val_dataset)} образцов")
-    logger.info(f"   - Test: {len(test_dataset)} образцов")
+    logger.info(f"   - Train: {len(train_data)} записей")
+    logger.info(f"   - Val: {len(val_data)} записей")
+    logger.info(f"   - Test: {len(test_data)} записей")
     
     logger.end_stage("data_preparation", 
-                    train_size=len(train_dataset),
-                    val_size=len(val_dataset),
-                    test_size=len(test_dataset))
+                    train_size=len(train_data),
+                    val_size=len(val_data),
+                    test_size=len(test_data))
     
-    return train_dataset, val_dataset, test_dataset
+    return train_loader, val_loader, test_loader
 
-def train_model(config: dict, train_dataset, val_dataset, logger):
+def train_model(config: dict, train_loader, val_loader, logger):
     """Обучение модели"""
     logger.start_stage("model_training")
     
     logger.info("🏗️ Создание модели PatchTST...")
     
-    # Получаем информацию о данных
-    n_features = len(train_dataset.get_feature_names())
-    n_targets = len(train_dataset.get_target_names())
+    # Получаем информацию о данных из первого батча
+    sample_batch = next(iter(train_loader))
+    X_sample, y_sample, _ = sample_batch
+    
+    n_features = X_sample.shape[-1]  # Последняя размерность
+    n_targets = y_sample.shape[-1] if y_sample is not None else 1
     
     logger.info(f"📊 Входные признаки: {n_features}, Целевые переменные: {n_targets}")
     
@@ -104,24 +151,7 @@ def train_model(config: dict, train_dataset, val_dataset, logger):
     from training.trainer import Trainer
     trainer = Trainer(model, config)
     
-    # Создание DataLoader'ов
-    from torch.utils.data import DataLoader
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['model']['batch_size'],
-        shuffle=True,
-        num_workers=config['performance'].get('num_workers', 4),
-        pin_memory=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['model']['batch_size'],
-        shuffle=False,
-        num_workers=config['performance'].get('num_workers', 4),
-        pin_memory=True
-    )
+    # DataLoader'ы уже созданы, используем их напрямую
     
     # Обучение
     logger.info("🚀 Начало обучения...")
@@ -137,9 +167,9 @@ def train_model(config: dict, train_dataset, val_dataset, logger):
     
     logger.end_stage("model_training", model_path=str(best_model_path))
     
-    return model, best_model_path, train_dataset
+    return model, best_model_path, train_loader
 
-def backtest_strategy(config: dict, model, test_dataset, train_dataset, logger):
+def backtest_strategy(config: dict, model, test_loader, train_loader, logger):
     """Бэктестирование стратегии"""
     logger.start_stage("backtesting")
     
@@ -157,10 +187,15 @@ def backtest_strategy(config: dict, model, test_dataset, train_dataset, logger):
     # Генерация предсказаний модели (фиктивных для демонстрации)
     logger.info("🔮 Генерация предсказаний модели...")
     
-    # Создаем фиктивные предсказания
-    n_samples = len(test_dataset)
+    # Создаем фиктивные предсказания на основе данных
+    sample_batch = next(iter(test_loader))
+    X_sample, y_sample, _ = sample_batch
+    
+    n_samples = len(test_loader.dataset) if hasattr(test_loader, 'dataset') else 1000
+    n_targets = y_sample.shape[-1] if y_sample is not None else 1
+    
     predictions = {
-        'price_pred': np.random.random((n_samples, config['model']['pred_len'], len(train_dataset.get_target_names()))),
+        'price_pred': np.random.random((n_samples, config['model']['pred_len'], n_targets)),
         'confidence': np.random.uniform(0.5, 0.9, n_samples)
     }
     
@@ -254,7 +289,7 @@ def main():
     
     try:
         if args.mode in ['data', 'full']:
-            train_dataset, val_dataset, test_dataset = prepare_data(config, logger)
+            train_loader, val_loader, test_loader = prepare_data(config, logger)
         
         if args.mode in ['train', 'full']:
             if args.mode == 'train':
@@ -262,7 +297,7 @@ def main():
                 logger.error("Режим 'train' требует предварительного запуска 'data'")
                 return
             
-            model, model_path, train_dataset = train_model(config, train_dataset, val_dataset, logger)
+            model, model_path, train_loader = train_model(config, train_loader, val_loader, logger)
         
         if args.mode in ['backtest', 'full']:
             if args.mode == 'backtest':
@@ -273,7 +308,7 @@ def main():
                 logger.info(f"📥 Загрузка модели: {args.model_path}")
                 # Здесь должна быть загрузка модели
                 
-            results = backtest_strategy(config, model, test_dataset, train_dataset, logger)
+            results = backtest_strategy(config, model, test_loader, train_loader, logger)
             
             validation_passed = analyze_results(config, results, logger)
         

@@ -330,6 +330,8 @@ def create_data_loaders(train_data: pd.DataFrame,
     context_window = config['model']['context_window']
     pred_window = config['model']['pred_len']
     num_workers = config['performance']['num_workers']
+    persistent_workers = config['performance'].get('persistent_workers', True) if num_workers > 0 else False
+    prefetch_factor = config['performance'].get('prefetch_factor', 2)
     
     logger.info("Создание датасетов...")
     
@@ -368,7 +370,9 @@ def create_data_loaders(train_data: pd.DataFrame,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
     
     val_loader = DataLoader(
@@ -376,7 +380,9 @@ def create_data_loaders(train_data: pd.DataFrame,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
     
     test_loader = DataLoader(
@@ -384,7 +390,9 @@ def create_data_loaders(train_data: pd.DataFrame,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
     
     return train_loader, val_loader, test_loader

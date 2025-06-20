@@ -32,13 +32,34 @@ class CryptoDataLoader:
         """Создание SQLAlchemy engine с поддержкой переменных окружения"""
         db_config = self.config['database'].copy()
         
-        # Обработка переменных окружения
+        # ИСПРАВЛЕННАЯ обработка переменных окружения с безопасным парсингом
         for key, value in db_config.items():
             if isinstance(value, str) and value.startswith('${'):
-                # Извлечение имени переменной и значения по умолчанию
-                var_name = value.split(':')[0][2:]
-                default_value = value.split(':')[1].rstrip('}')
-                db_config[key] = os.getenv(var_name, default_value)
+                try:
+                    # Проверяем наличие разделителя ':'
+                    if ':' in value:
+                        # Извлечение имени переменной и значения по умолчанию
+                        var_name = value.split(':')[0][2:]
+                        default_value = value.split(':')[1].rstrip('}')
+                    else:
+                        # Если разделителя нет, используем всю строку как имя переменной
+                        var_name = value[2:-1]  # Убираем ${ и }
+                        default_value = None
+                    
+                    # Получаем значение из окружения
+                    env_value = os.getenv(var_name, default_value)
+                    
+                    # Если ни в окружении, ни в дефолте нет значения
+                    if env_value is None:
+                        self.logger.warning(f"Переменная окружения {var_name} не найдена и нет значения по умолчанию")
+                        env_value = ""  # Используем пустую строку вместо None
+                    
+                    db_config[key] = env_value
+                    
+                except Exception as e:
+                    self.logger.error(f"Ошибка парсинга переменной окружения {value}: {e}")
+                    # Оставляем исходное значение
+                    db_config[key] = value
         
         # Преобразование порта в int
         db_config['port'] = int(db_config['port'])
@@ -136,8 +157,21 @@ class CryptoDataLoader:
                   symbols: Optional[List[str]] = None,
                   start_date: Optional[str] = None,
                   end_date: Optional[str] = None) -> pd.DataFrame:
-        """Загрузка данных из БД с валидацией"""
-        symbols = symbols or self.config['data']['symbols']
+        """ИСПРАВЛЕННАЯ загрузка данных с поддержкой symbols: all"""
+        
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Правильная обработка symbols
+        if symbols is None:
+            config_symbols = self.config['data']['symbols']
+            if config_symbols == 'all':
+                self.logger.info("Загрузка всех доступных символов...")
+                symbols = self.get_available_symbols()
+            elif isinstance(config_symbols, list):
+                symbols = config_symbols
+            elif isinstance(config_symbols, str):
+                symbols = [config_symbols]  # Один символ как строка
+            else:
+                raise ValueError(f"Неподдерживаемый тип symbols: {type(config_symbols)}")
+        
         start_date = start_date or self.config['data']['start_date']
         end_date = end_date or self.config['data']['end_date']
         

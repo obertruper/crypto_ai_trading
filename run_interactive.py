@@ -53,6 +53,50 @@ class CryptoTradingMenu:
         self.logger = menu_logger
         self.logger.info(f"Запуск интерактивного меню. Лог файл: {log_file}")
         
+        # Загружаем профили серверов
+        self.profiles_path = Path("config/server_profiles.yaml")
+        self.server_profiles = self.load_server_profiles()
+        
+        # SSH параметры подключения из активного профиля или конфига
+        if self.server_profiles:
+            active_profile = self.server_profiles.get('active_profile')
+            if active_profile and active_profile in self.server_profiles.get('profiles', {}):
+                profile = self.server_profiles['profiles'][active_profile]
+                self.ssh_host = profile['connection']['host']
+                self.ssh_port = str(profile['connection']['port'])
+                self.ssh_user = profile['connection']['user']
+                self.ssh_key_path = profile['connection']['key_path']
+                self.current_server_profile = active_profile
+                self.logger.info(f"Используется профиль сервера: {active_profile} - {profile['name']}")
+            else:
+                self.logger.warning("Активный профиль сервера не найден, используются настройки из основного конфига")
+                self._load_config_ssh_params()
+        else:
+            self.logger.warning("Файл профилей серверов не найден, используются настройки из основного конфига")
+            self._load_config_ssh_params()
+            
+    def _load_config_ssh_params(self):
+        """Загрузка SSH параметров из основного конфига (fallback)"""
+        remote_config = self.config.get('remote_server', {})
+        direct_config = remote_config.get('direct_connection', {})
+        
+        self.ssh_host = direct_config.get('host', '184.98.25.179')
+        self.ssh_port = str(direct_config.get('port', 41575))
+        self.ssh_user = direct_config.get('user', 'root')
+        self.ssh_key_path = direct_config.get('key_path', '~/.ssh/id_rsa')
+        self.current_server_profile = None
+        
+    def load_server_profiles(self):
+        """Загрузка профилей серверов"""
+        try:
+            if self.profiles_path.exists():
+                with open(self.profiles_path, 'r', encoding='utf-8') as f:
+                    return yaml.safe_load(f)
+            return None
+        except Exception as e:
+            self.logger.error(f"Ошибка загрузки профилей серверов: {e}")
+            return None
+        
     def load_config(self) -> Dict:
         """Загрузка конфигурации"""
         with open(self.config_path, 'r', encoding='utf-8') as f:
@@ -62,6 +106,32 @@ class CryptoTradingMenu:
         """Сохранение конфигурации"""
         with open(self.config_path, 'w', encoding='utf-8') as f:
             yaml.dump(self.config, f, default_flow_style=False, allow_unicode=True)
+    
+    def get_ssh_command(self, command: Optional[str] = None) -> List[str]:
+        """Получение SSH команды с правильными параметрами"""
+        ssh_cmd = [
+            "ssh",
+            "-i", os.path.expanduser(self.ssh_key_path),
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-p", self.ssh_port,
+            f"{self.ssh_user}@{self.ssh_host}"
+        ]
+        if command:
+            ssh_cmd.append(command)
+        return ssh_cmd
+    
+    def get_scp_command(self, source: str, destination: str) -> List[str]:
+        """Получение SCP команды с правильными параметрами"""
+        return [
+            "scp",
+            "-i", os.path.expanduser(self.ssh_key_path),
+            "-P", self.ssh_port,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            source,
+            destination
+        ]
     
     def display_main_menu(self):
         """Отображение главного меню"""
@@ -206,8 +276,9 @@ class CryptoTradingMenu:
             options.add_row("2", "Настройки данных")
             options.add_row("3", "Настройки риск-менеджмента")
             options.add_row("4", "Параметры бэктестинга")
-            options.add_row("5", "Сохранить конфигурацию")
-            options.add_row("6", "Загрузить конфигурацию")
+            options.add_row("5", "🖥️ Управление профилями серверов")
+            options.add_row("6", "Сохранить конфигурацию")
+            options.add_row("7", "Загрузить конфигурацию")
             options.add_row("0", "Назад")
             
             self.console.print(options)
@@ -223,10 +294,12 @@ class CryptoTradingMenu:
             elif choice == "4":
                 self.configure_backtesting()
             elif choice == "5":
+                self.manage_server_profiles()
+            elif choice == "6":
                 self.save_config()
                 self.console.print("[green]✅ Конфигурация сохранена[/green]")
                 time.sleep(1)
-            elif choice == "6":
+            elif choice == "7":
                 self.config = self.load_config()
                 self.console.print("[green]✅ Конфигурация загружена[/green]")
                 time.sleep(1)
@@ -507,50 +580,6 @@ except:
         Prompt.ask("\nНажмите Enter для продолжения")
     
     
-    def launch_gpu_training(self):
-        """Запуск обучения на GPU"""
-        self.console.print("\n[cyan]🚀 Запуск обучения на GPU сервере[/cyan]")
-        
-        # Выбор режима
-        self.console.print("\n[cyan]Выберите режим обучения:[/cyan]")
-        self.console.print("1. Демо (5 эпох) - ~15-20 минут")
-        self.console.print("2. Стандартное (50 эпох) - ~2-3 часа")
-        self.console.print("3. Полное (100 эпох) - ~5-6 часов")
-        self.console.print("4. Пользовательское")
-        
-        choice = Prompt.ask("Выбор", default="1")
-        
-        epochs = {
-            "1": 5,
-            "2": 50,
-            "3": 100
-        }.get(choice)
-        
-        if choice == "4":
-            epochs = IntPrompt.ask("Количество эпох", default=20)
-        
-        if epochs:
-            # Временно обновляем конфигурацию
-            original_epochs = self.config['model']['epochs']
-            self.config['model']['epochs'] = epochs
-            self.save_config()
-            
-            self.console.print(f"\n[yellow]Запуск обучения на {epochs} эпох...[/yellow]")
-            
-            script_path = "scripts/run_on_vast.sh"
-            if os.path.exists(script_path):
-                try:
-                    subprocess.run([script_path])
-                except KeyboardInterrupt:
-                    self.console.print("\n[yellow]Прервано пользователем[/yellow]")
-            else:
-                self.console.print("[red]❌ Скрипт запуска не найден[/red]")
-            
-            # Восстанавливаем конфигурацию
-            self.config['model']['epochs'] = original_epochs
-            self.save_config()
-        
-        Prompt.ask("\nНажмите Enter для продолжения")
     
     def monitor_gpu(self):
         """Мониторинг GPU сервера"""
@@ -598,19 +627,54 @@ except:
         
         remote_config = self.config.setdefault('remote_server', {})
         
-        self.console.print("\nТекущие настройки:")
-        self.console.print(f"Host: {remote_config.get('primary', {}).get('host', 'Не задан')}")
-        self.console.print(f"Port: {remote_config.get('primary', {}).get('port', 'Не задан')}")
+        # Проверяем текущие настройки
+        direct_config = remote_config.get('direct_connection', {})
+        proxy_config = remote_config.get('proxy_connection', {})
+        
+        self.console.print("\n[cyan]Текущие настройки подключения:[/cyan]")
+        self.console.print("\n[bold]Прямое подключение:[/bold]")
+        self.console.print(f"  Host: {direct_config.get('host', '184.98.25.179')}")
+        self.console.print(f"  Port: {direct_config.get('port', 41575)}")
+        
+        if proxy_config:
+            self.console.print("\n[bold]Подключение через прокси:[/bold]")
+            self.console.print(f"  Host: {proxy_config.get('host', 'ssh8.vast.ai')}")
+            self.console.print(f"  Port: {proxy_config.get('port', 13641)}")
         
         if Confirm.ask("\nИзменить настройки?"):
-            host = Prompt.ask("IP адрес сервера", default="114.32.64.6")
-            port = IntPrompt.ask("SSH порт", default=40134)
+            # Настройка прямого подключения
+            self.console.print("\n[cyan]Настройка прямого подключения:[/cyan]")
+            direct_host = Prompt.ask("IP адрес сервера", default=direct_config.get('host', "184.98.25.179"))
+            direct_port = IntPrompt.ask("SSH порт", default=direct_config.get('port', 41575))
             
+            # Спрашиваем про прокси
+            if Confirm.ask("\nНастроить альтернативное подключение через прокси?"):
+                self.console.print("\n[cyan]Настройка подключения через прокси:[/cyan]")
+                proxy_host = Prompt.ask("Прокси хост", default="ssh8.vast.ai")
+                proxy_port = IntPrompt.ask("Прокси порт", default=13641)
+                
+                remote_config['proxy_connection'] = {
+                    'host': proxy_host,
+                    'port': proxy_port,
+                    'user': 'root',
+                    'key_path': '~/.ssh/vast_ai_key'
+                }
+            
+            # Сохраняем настройки
             remote_config['enabled'] = True
-            remote_config.setdefault('primary', {})['host'] = host
-            remote_config.setdefault('primary', {})['port'] = port
-            remote_config['user'] = 'root'
-            remote_config['key_path'] = '~/.ssh/vast_ai_key'
+            remote_config['direct_connection'] = {
+                'host': direct_host,
+                'port': direct_port,
+                'user': 'root',
+                'key_path': '~/.ssh/vast_ai_key'
+            }
+            
+            # Спрашиваем предпочтительный способ
+            self.console.print("\n[cyan]Выберите предпочтительный способ подключения:[/cyan]")
+            self.console.print("1. Прямое подключение")
+            self.console.print("2. Через прокси")
+            pref = Prompt.ask("Выбор", default="1")
+            remote_config['preferred_connection'] = 'direct' if pref == "1" else 'proxy'
             
             self.save_config()
             self.console.print("[green]✅ Настройки сохранены[/green]")
@@ -959,6 +1023,50 @@ for _, row in df.iterrows():
         
         Prompt.ask("\nНажмите Enter для продолжения")
     
+    def manage_server_profiles(self):
+        """Управление профилями серверов"""
+        self.console.print("\n[cyan]🖥️ Управление профилями серверов[/cyan]")
+        
+        # Проверяем наличие утилиты управления профилями
+        profile_manager = Path("manage_servers.py")
+        if not profile_manager.exists():
+            self.console.print("[red]❌ Утилита manage_servers.py не найдена[/red]")
+            Prompt.ask("\nНажмите Enter для продолжения")
+            return
+        
+        try:
+            # Запускаем утилиту управления профилями
+            self.console.print("[yellow]Запуск утилиты управления профилями серверов...[/yellow]")
+            result = subprocess.run(["python", "manage_servers.py"], check=False)
+            
+            # После возврата из утилиты перезагружаем профили
+            self.server_profiles = self.load_server_profiles()
+            
+            # Обновляем SSH параметры если профиль изменился
+            if self.server_profiles:
+                active_profile = self.server_profiles.get('active_profile')
+                if active_profile and active_profile in self.server_profiles.get('profiles', {}):
+                    profile = self.server_profiles['profiles'][active_profile]
+                    
+                    # Проверяем, изменились ли параметры подключения
+                    old_host = self.ssh_host
+                    new_host = profile['connection']['host']
+                    
+                    if old_host != new_host:
+                        self.ssh_host = profile['connection']['host']
+                        self.ssh_port = str(profile['connection']['port'])
+                        self.ssh_user = profile['connection']['user']
+                        self.ssh_key_path = profile['connection']['key_path']
+                        self.current_server_profile = active_profile
+                        
+                        self.console.print(f"[green]✅ Профиль сервера обновлен: {profile['name']}[/green]")
+                        self.logger.info(f"Профиль сервера изменен на: {active_profile}")
+            
+        except Exception as e:
+            self.console.print(f"[red]❌ Ошибка при запуске утилиты: {e}[/red]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
     def configure_risk_management(self):
         """Настройка риск-менеджмента"""
         self.console.print("\n[cyan]⚙️ Настройки риск-менеджмента:[/cyan]")
@@ -1094,10 +1202,16 @@ for _, row in df.iterrows():
             info_table.add_column("Value", style="white")
             
             info_table.add_row("📊 Информация о сервере:", "")
-            info_table.add_row("   • GPU:", "2x RTX 5090 (216.2 TFLOPS)")
-            info_table.add_row("   • VRAM:", "32 GB")
-            info_table.add_row("   • RAM:", "129 GB")
-            info_table.add_row("   • Ускорение:", "15-30x по сравнению с CPU")
+            info_table.add_row("   • GPU:", "2x RTX 4090 (82.6 TFLOPS)")
+            info_table.add_row("   • VRAM:", "48 GB (2x24)")
+            info_table.add_row("   • RAM:", "90 GB")
+            info_table.add_row("   • Ускорение:", "10-20x по сравнению с CPU")
+            
+            # Показываем текущий способ подключения
+            remote_config = self.config.get('remote_server', {})
+            preferred = remote_config.get('preferred_connection', 'direct')
+            conn_type = "Прямое подключение" if preferred == 'direct' else "Через прокси"
+            info_table.add_row("   • Подключение:", conn_type)
             
             self.console.print(info_table)
             
@@ -1161,23 +1275,36 @@ for _, row in df.iterrows():
     def _check_server_status(self):
         """Проверка состояния сервера"""
         try:
-            # Получаем SSH алиас из конфига или переменной окружения
-            ssh_alias = os.environ.get('VAST_SSH_ALIAS', 'vast-current')
+            # Получаем параметры подключения из конфига
+            remote_config = self.config.get('remote_server', {})
             
-            # Проверяем доступность сервера
-            result = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=5", ssh_alias, 
-                 "test -d /root/crypto_ai_trading && echo 'PROJECT_EXISTS' || echo 'NO_PROJECT'"],
-                capture_output=True,
-                text=True
-            )
+            # Определяем способ подключения - пробуем прямое, потом прокси
+            connections = [
+                ("184.98.25.179", 41575),  # Прямое подключение
+                ("ssh8.vast.ai", 13641)     # Через прокси
+            ]
             
-            if result.returncode == 0:
-                project_exists = "PROJECT_EXISTS" in result.stdout
-                return {'connected': True, 'project_exists': project_exists}
-            else:
-                return {'connected': False, 'project_exists': False}
-        except:
+            for host, port in connections:
+                # Проверяем доступность сервера
+                result = subprocess.run(
+                    ["ssh", "-p", str(port), f"root@{host}",
+                     "-i", os.path.expanduser("~/.ssh/id_rsa"),
+                     "-o", "ConnectTimeout=5",
+                     "-o", "StrictHostKeyChecking=no",
+                     "-o", "UserKnownHostsFile=/dev/null",
+                     "test -d /root/crypto_ai_trading && echo 'PROJECT_EXISTS' || echo 'NO_PROJECT'"],
+                    capture_output=True,
+                    text=True
+                )
+                
+                if result.returncode == 0:
+                    project_exists = "PROJECT_EXISTS" in result.stdout
+                    return {'connected': True, 'project_exists': project_exists, 'host': host, 'port': port}
+            
+            # Если ничего не сработало
+            return {'connected': False, 'project_exists': False}
+        except Exception as e:
+            self.logger.error(f"Ошибка проверки сервера: {e}")
             return {'connected': False, 'project_exists': False}
     
     def sync_to_gpu_server(self):
@@ -1205,14 +1332,10 @@ for _, row in df.iterrows():
             Prompt.ask("\nНажмите Enter для продолжения")
             return
         
-        # Получаем SSH алиас
-        ssh_alias = os.environ.get('VAST_SSH_ALIAS', 'vast-current')
-        
         # Проверяем наличие кэша на сервере
         with self.console.status("[cyan]Проверка данных на сервере...[/cyan]"):
             result = subprocess.run(
-                ["ssh", ssh_alias, 
-                 "test -f /root/crypto_ai_trading/cache/features_cache.pkl && echo 'EXISTS' || echo 'NOT_EXISTS'"],
+                self.get_ssh_command("test -f /root/crypto_ai_trading/cache/features_cache.pkl && echo 'EXISTS' || echo 'NOT_EXISTS'"),
                 capture_output=True,
                 text=True
             )
@@ -1222,12 +1345,12 @@ for _, row in df.iterrows():
             self.console.print(f"[dim]Размер файла: {cache_file.stat().st_size / (1024*1024):.1f} MB[/dim]")
             
             # Создаем директорию и копируем файл
-            subprocess.run(["ssh", ssh_alias, "mkdir -p /root/crypto_ai_trading/cache"])
+            subprocess.run(self.get_ssh_command("mkdir -p /root/crypto_ai_trading/cache"))
             
             with Progress() as progress:
                 task = progress.add_task("[cyan]Копирование кэша...", total=100)
                 result = subprocess.run(
-                    ["scp", str(cache_file), f"{ssh_alias}:/root/crypto_ai_trading/cache/"],
+                    self.get_scp_command(str(cache_file), f"{self.ssh_user}@{self.ssh_host}:/root/crypto_ai_trading/cache/"),
                     capture_output=True,
                     text=True
                 )
@@ -1253,57 +1376,103 @@ for _, row in df.iterrows():
         
         if choice == "1":
             epochs = 5
-            mode_choice = "1"
         elif choice == "2":
             epochs = 50
-            mode_choice = "3"
         elif choice == "3":
             epochs = 100
-            mode_choice = "2"
         elif choice == "4":
             epochs = IntPrompt.ask("Количество эпох", default=10)
-            mode_choice = "3"
         else:
             return
         
-        self.console.print(f"\n[yellow]Запуск обучения на {epochs} эпох...[/yellow]")
+        # Выбор источника данных
+        self.console.print("\n[bold cyan]Выберите источник данных:[/bold cyan]")
+        self.console.print("1. Использовать только кэш (рекомендуется для GPU сервера)")
+        self.console.print("2. Использовать базу данных (требует SSH туннель)")
         
-        # Передаем выбор режима в скрипт через переменную окружения
-        env = os.environ.copy()
-        env['GPU_TRAINING_MODE'] = mode_choice
-        env['GPU_TRAINING_EPOCHS'] = str(epochs)
-        env['USE_CACHE_ONLY'] = '1'  # Флаг для использования кэша
+        data_source = Prompt.ask("Выбор", default="1")
         
-        # Запуск скрипта на сервере
-        script_path = "scripts/run_on_vast.sh"
-        if Path(script_path).exists():
-            try:
-                # Запускаем скрипт и ждем его завершения
-                result = subprocess.run(
-                    ["bash", script_path], 
-                    env=env,
-                    capture_output=True,
-                    text=True
-                )
-                
-                # Показываем вывод скрипта
-                if result.stdout:
-                    print(result.stdout)
-                
-                if result.returncode == 0:
-                    self.console.print("\n[green]✅ Скрипт завершен успешно![/green]")
-                    
-                    # Предлагаем запустить мониторинг
-                    if Confirm.ask("\nЗапустить мониторинг в браузере?"):
-                        self.monitor_with_browser()
+        use_cache_only = True
+        if data_source == "2":
+            use_cache_only = False
+            # Проверяем SSH туннель
+            self.console.print("\n[yellow]Проверка SSH туннеля к локальной БД...[/yellow]")
+            tunnel_check = subprocess.run(
+                self.get_ssh_command("nc -zv localhost 5555 2>&1 | grep -q 'succeeded' && echo 'TUNNEL_OK' || echo 'NO_TUNNEL'"),
+                capture_output=True,
+                text=True
+            )
+            
+            if "NO_TUNNEL" in tunnel_check.stdout:
+                self.console.print("[yellow]⚠️ SSH туннель к БД не обнаружен[/yellow]")
+                if Confirm.ask("Создать туннель сейчас?"):
+                    self.setup_db_tunnel()
+                    # После создания туннеля продолжаем
                 else:
-                    self.console.print(f"\n[red]❌ Ошибка запуска: код {result.returncode}[/red]")
-                    if result.stderr:
-                        self.console.print(f"[red]{result.stderr}[/red]")
-            except Exception as e:
-                self.console.print(f"[red]❌ Ошибка: {e}[/red]")
+                    self.console.print("[red]❌ Без туннеля невозможно использовать БД[/red]")
+                    Prompt.ask("\nНажмите Enter для продолжения")
+                    return
+        
+        self.console.print(f"\n[yellow]Запуск обучения на {epochs} эпох в tmux сессии...[/yellow]")
+        self.console.print(f"[dim]Источник данных: {'Кэш' if use_cache_only else 'База данных'}[/dim]")
+        
+        # Изменяем количество эпох в конфиге на сервере
+        self.console.print("[dim]Обновление конфигурации на сервере...[/dim]")
+        subprocess.run(
+            self.get_ssh_command(f"cd /root/crypto_ai_trading && python3 -c \"import yaml; config = yaml.safe_load(open('config/config.yaml')); config['model']['epochs'] = {epochs}; yaml.dump(config, open('config/config.yaml', 'w'), default_flow_style=False)\"")
+        )
+        
+        # Запускаем обучение в tmux
+        session_name = f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # Команда для запуска в зависимости от источника данных
+        if use_cache_only:
+            # Режим только с кэшем - используем существующий run_full_pipeline.py с переменной окружения
+            training_cmd = f"""cd /root/crypto_ai_trading && \
+export USE_CACHE_ONLY=1 && \
+export CUDA_VISIBLE_DEVICES=0,1 && \
+export PYTHONUNBUFFERED=1 && \
+python3 run_full_pipeline.py --mode train 2>&1 | tee logs/training_gpu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"""
         else:
-            self.console.print(f"[red]❌ Скрипт {script_path} не найден[/red]")
+            # Режим с базой данных
+            training_cmd = f"""cd /root/crypto_ai_trading && \
+export CUDA_VISIBLE_DEVICES=0,1 && \
+export PYTHONUNBUFFERED=1 && \
+python3 run_full_pipeline.py --mode train 2>&1 | tee logs/training_gpu_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"""
+        
+        # Создаем tmux сессию
+        self.console.print(f"[dim]Создание tmux сессии: {session_name}[/dim]")
+        result = subprocess.run(
+            self.get_ssh_command(f"tmux new-session -d -s {session_name} '{training_cmd}'"),
+            capture_output=True, text=True
+        )
+        
+        if result.returncode == 0:
+            self.console.print(f"\n[green]✅ Обучение запущено в tmux сессии: {session_name}[/green]")
+            self.console.print("\n[cyan]Полезные команды:[/cyan]")
+            self.console.print(f"   • Подключиться к сессии: ssh -p {self.ssh_port} {self.ssh_user}@{self.ssh_host} tmux attach -t {session_name}")
+            self.console.print(f"   • Отключиться от сессии: Ctrl+B, затем D")
+            self.console.print(f"   • Список сессий: ssh -p {self.ssh_port} {self.ssh_user}@{self.ssh_host} tmux ls")
+            
+            # Ждем немного, чтобы обучение начало записывать логи
+            time.sleep(3)
+            
+            # Предлагаем мониторинг
+            self.console.print("\n[bold cyan]Выберите действие:[/bold cyan]")
+            self.console.print("1. Открыть мониторинг в реальном времени")
+            self.console.print("2. Открыть TensorBoard в браузере")
+            self.console.print("3. Вернуться в меню")
+            
+            monitor_choice = Prompt.ask("Выбор", default="1")
+            
+            if monitor_choice == "1":
+                self.monitor_realtime_logs(session_name)
+            elif monitor_choice == "2":
+                self.monitor_with_browser()
+        else:
+            self.console.print(f"\n[red]❌ Ошибка создания tmux сессии[/red]")
+            if result.stderr:
+                self.console.print(f"[red]{result.stderr}[/red]")
         
         Prompt.ask("\nНажмите Enter для продолжения")
     
@@ -1316,11 +1485,8 @@ for _, row in df.iterrows():
             # Проверяем, запущен ли TensorBoard на сервере
             self.console.print("[yellow]Проверка TensorBoard на сервере...[/yellow]")
             
-            # Получаем SSH алиас
-            ssh_alias = os.environ.get('VAST_SSH_ALIAS', 'vast-current')
-            
             result = subprocess.run(
-                ["ssh", ssh_alias, "pgrep -f tensorboard"],
+                self.get_ssh_command("pgrep -f tensorboard"),
                 capture_output=True
             )
             
@@ -1329,8 +1495,7 @@ for _, row in df.iterrows():
                 
                 # Сначала проверяем, где есть логи
                 check_dirs = subprocess.run(
-                    ["ssh", ssh_alias, 
-                     "cd /root/crypto_ai_trading && find . -name 'events.out.tfevents*' | head -5"],
+                    self.get_ssh_command("cd /root/crypto_ai_trading && find . -name 'events.out.tfevents*' | head -5"),
                     capture_output=True,
                     text=True
                 )
@@ -1340,8 +1505,7 @@ for _, row in df.iterrows():
                 
                 # Запускаем TensorBoard на порту 6007 (6006 занят Caddy)
                 subprocess.run(
-                    ["ssh", ssh_alias, 
-                     "cd /root/crypto_ai_trading && pkill -f tensorboard; nohup tensorboard --logdir ./experiments/runs --bind_all --port 6007 > logs/tensorboard.log 2>&1 &"],
+                    self.get_ssh_command("cd /root/crypto_ai_trading && pkill -f tensorboard; nohup tensorboard --logdir ./experiments/runs --bind_all --port 6007 > logs/tensorboard.log 2>&1 &"),
                     capture_output=True
                 )
                 time.sleep(3)
@@ -1364,9 +1528,19 @@ for _, row in df.iterrows():
             browser_thread = threading.Thread(target=open_browser)
             browser_thread.start()
             
-            # Запускаем SSH туннель с автоматическим выбором
+            # Определяем способ подключения
             env = os.environ.copy()
-            env['VAST_CONNECTION_MODE'] = '1'  # Прямое подключение
+            
+            # Проверяем предпочтительный способ подключения из конфига
+            remote_config = self.config.get('remote_server', {})
+            preferred = remote_config.get('preferred_connection', 'direct')
+            
+            if preferred == 'proxy' and 'proxy_connection' in remote_config:
+                env['VAST_CONNECTION_MODE'] = '2'  # Прокси подключение
+                self.console.print("[dim]Используется подключение через прокси[/dim]")
+            else:
+                env['VAST_CONNECTION_MODE'] = '1'  # Прямое подключение
+                self.console.print("[dim]Используется прямое подключение[/dim]")
             
             script_path = "scripts/connect_vast.sh"
             if Path(script_path).exists():
@@ -1385,25 +1559,159 @@ for _, row in df.iterrows():
         
         Prompt.ask("\nНажмите Enter для продолжения")
     
+    def monitor_realtime_logs(self, session_name=None):
+        """Мониторинг логов в реальном времени"""
+        self.console.print("\n[cyan]📋 Мониторинг логов в реальном времени[/cyan]")
+        
+        # Выбираем источник логов
+        self.console.print("\n[bold cyan]Выберите источник логов:[/bold cyan]")
+        self.console.print("1. Последний лог файл")
+        self.console.print("2. Вывод из tmux сессии")
+        self.console.print("3. Все логи обучения")
+        
+        choice = Prompt.ask("Выбор", default="1")
+        
+        try:
+            if choice == "1":
+                # Находим последний лог файл
+                result = subprocess.run(
+                    self.get_ssh_command("cd /root/crypto_ai_trading && ls -t logs/training_gpu_*.log 2>/dev/null | head -1"),
+                    capture_output=True,
+                    text=True
+                )
+                
+                if result.stdout.strip():
+                    log_file = result.stdout.strip()
+                    self.console.print(f"\n[yellow]Мониторинг файла: {log_file}[/yellow]")
+                    self.console.print("[dim]Нажмите Ctrl+C для остановки[/dim]\n")
+                    
+                    # Запускаем tail -f с полным путем
+                    subprocess.run(self.get_ssh_command(f"cd /root/crypto_ai_trading && tail -f {log_file}"))
+                else:
+                    self.console.print("[red]❌ Лог файлы не найдены[/red]")
+                    
+            elif choice == "2":
+                # Список tmux сессий
+                if not session_name:
+                    result = subprocess.run(
+                        self.get_ssh_command("tmux ls 2>/dev/null"),
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    if result.stdout:
+                        self.console.print("\n[cyan]Активные tmux сессии:[/cyan]")
+                        sessions = []
+                        for line in result.stdout.strip().split('\n'):
+                            session = line.split(':')[0]
+                            sessions.append(session)
+                            self.console.print(f"  • {session}")
+                        
+                        if len(sessions) == 1:
+                            session_name = sessions[0]
+                        else:
+                            session_name = Prompt.ask("\nВведите имя сессии", default=sessions[0])
+                    else:
+                        self.console.print("[yellow]⚠️ Нет активных tmux сессий[/yellow]")
+                        return
+                
+                self.console.print(f"\n[yellow]Подключение к сессии: {session_name}[/yellow]")
+                self.console.print("[dim]Для отключения: Ctrl+B, затем D[/dim]\n")
+                
+                # Подключаемся к tmux сессии
+                ssh_cmd = self.get_ssh_command()
+                ssh_cmd.insert(1, "-t")  # Добавляем -t после ssh для интерактивного режима
+                ssh_cmd.append(f"tmux attach -t {session_name}")
+                subprocess.run(ssh_cmd)
+                
+            elif choice == "3":
+                # Мониторинг всех логов
+                self.console.print("\n[yellow]Мониторинг всех логов обучения[/yellow]")
+                self.console.print("[dim]Нажмите Ctrl+C для остановки[/dim]\n")
+                
+                subprocess.run(
+                    self.get_ssh_command("cd /root/crypto_ai_trading && tail -f logs/training*.log logs/*.log 2>/dev/null")
+                )
+                
+        except KeyboardInterrupt:
+            self.console.print("\n[yellow]Мониторинг остановлен[/yellow]")
+        except Exception as e:
+            self.console.print(f"[red]❌ Ошибка: {e}[/red]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
     def check_gpu_logs(self):
         """Проверить логи на GPU сервере"""
-        self.console.print("\n[cyan]📋 Получение логов с сервера...[/cyan]")
+        self.console.print("\n[cyan]📋 Логи с GPU сервера[/cyan]")
         
-        # Получаем SSH алиас
-        ssh_alias = os.environ.get('VAST_SSH_ALIAS', 'vast-current')
+        # Меню выбора
+        self.console.print("\n[bold cyan]Выберите действие:[/bold cyan]")
+        self.console.print("1. Показать последние 50 строк")
+        self.console.print("2. Мониторинг в реальном времени")
+        self.console.print("3. Скачать лог файл")
+        self.console.print("4. Показать список всех логов")
         
-        result = subprocess.run(
-            ["ssh", ssh_alias, 
-             "tail -n 50 /root/crypto_ai_trading/logs/training_gpu.log 2>/dev/null || echo 'Логи не найдены'"],
-            capture_output=True,
-            text=True
-        )
+        choice = Prompt.ask("Выбор", default="1")
         
-        if result.returncode == 0:
-            self.console.print("\n[yellow]Последние строки лога:[/yellow]")
-            self.console.print(result.stdout)
-        else:
-            self.console.print("[red]❌ Не удалось получить логи[/red]")
+        if choice == "1":
+            # Последние строки
+            result = subprocess.run(
+                self.get_ssh_command("cd /root/crypto_ai_trading && ls -t logs/training_gpu_*.log 2>/dev/null | head -1 | xargs tail -n 50"),
+                capture_output=True,
+                text=True
+            )
+            
+            if result.stdout:
+                self.console.print("\n[yellow]Последние 50 строк лога:[/yellow]")
+                self.console.print(result.stdout)
+            else:
+                self.console.print("[red]❌ Логи не найдены[/red]")
+                
+        elif choice == "2":
+            # Мониторинг в реальном времени
+            self.monitor_realtime_logs()
+            return  # monitor_realtime_logs уже показывает prompt
+            
+        elif choice == "3":
+            # Скачать лог
+            result = subprocess.run(
+                self.get_ssh_command("cd /root/crypto_ai_trading && ls -t logs/training_gpu_*.log 2>/dev/null | head -1"),
+                capture_output=True,
+                text=True
+            )
+            
+            if result.stdout.strip():
+                remote_file = result.stdout.strip()
+                local_file = f"logs/downloaded_{Path(remote_file).name}"
+                
+                self.console.print(f"\n[yellow]Скачивание {remote_file}...[/yellow]")
+                
+                Path("logs").mkdir(exist_ok=True)
+                result = subprocess.run(
+                    self.get_scp_command(f"{self.ssh_user}@{self.ssh_host}:{remote_file}", local_file),
+                    capture_output=True
+                )
+                
+                if result.returncode == 0:
+                    self.console.print(f"[green]✅ Лог скачан: {local_file}[/green]")
+                else:
+                    self.console.print("[red]❌ Ошибка скачивания[/red]")
+            else:
+                self.console.print("[red]❌ Лог файлы не найдены[/red]")
+                
+        elif choice == "4":
+            # Список логов
+            result = subprocess.run(
+                self.get_ssh_command("cd /root/crypto_ai_trading && ls -lah logs/*.log 2>/dev/null | tail -20"),
+                capture_output=True,
+                text=True
+            )
+            
+            if result.stdout:
+                self.console.print("\n[cyan]Логи на сервере:[/cyan]")
+                self.console.print(result.stdout)
+            else:
+                self.console.print("[yellow]Логи не найдены[/yellow]")
         
         Prompt.ask("\nНажмите Enter для продолжения")
     
@@ -1413,19 +1721,54 @@ for _, row in df.iterrows():
         
         remote_config = self.config.setdefault('remote_server', {})
         
-        self.console.print("\nТекущие настройки:")
-        self.console.print(f"Host: {remote_config.get('primary', {}).get('host', 'Не задан')}")
-        self.console.print(f"Port: {remote_config.get('primary', {}).get('port', 'Не задан')}")
+        # Проверяем текущие настройки
+        direct_config = remote_config.get('direct_connection', {})
+        proxy_config = remote_config.get('proxy_connection', {})
+        
+        self.console.print("\n[cyan]Текущие настройки подключения:[/cyan]")
+        self.console.print("\n[bold]Прямое подключение:[/bold]")
+        self.console.print(f"  Host: {direct_config.get('host', '184.98.25.179')}")
+        self.console.print(f"  Port: {direct_config.get('port', 41575)}")
+        
+        if proxy_config:
+            self.console.print("\n[bold]Подключение через прокси:[/bold]")
+            self.console.print(f"  Host: {proxy_config.get('host', 'ssh8.vast.ai')}")
+            self.console.print(f"  Port: {proxy_config.get('port', 13641)}")
         
         if Confirm.ask("\nИзменить настройки?"):
-            host = Prompt.ask("IP адрес сервера", default="114.32.64.6")
-            port = IntPrompt.ask("SSH порт", default=40134)
+            # Настройка прямого подключения
+            self.console.print("\n[cyan]Настройка прямого подключения:[/cyan]")
+            direct_host = Prompt.ask("IP адрес сервера", default=direct_config.get('host', "184.98.25.179"))
+            direct_port = IntPrompt.ask("SSH порт", default=direct_config.get('port', 41575))
             
+            # Спрашиваем про прокси
+            if Confirm.ask("\nНастроить альтернативное подключение через прокси?"):
+                self.console.print("\n[cyan]Настройка подключения через прокси:[/cyan]")
+                proxy_host = Prompt.ask("Прокси хост", default="ssh8.vast.ai")
+                proxy_port = IntPrompt.ask("Прокси порт", default=13641)
+                
+                remote_config['proxy_connection'] = {
+                    'host': proxy_host,
+                    'port': proxy_port,
+                    'user': 'root',
+                    'key_path': '~/.ssh/vast_ai_key'
+                }
+            
+            # Сохраняем настройки
             remote_config['enabled'] = True
-            remote_config.setdefault('primary', {})['host'] = host
-            remote_config.setdefault('primary', {})['port'] = port
-            remote_config['user'] = 'root'
-            remote_config['key_path'] = '~/.ssh/vast_ai_key'
+            remote_config['direct_connection'] = {
+                'host': direct_host,
+                'port': direct_port,
+                'user': 'root',
+                'key_path': '~/.ssh/vast_ai_key'
+            }
+            
+            # Спрашиваем предпочтительный способ
+            self.console.print("\n[cyan]Выберите предпочтительный способ подключения:[/cyan]")
+            self.console.print("1. Прямое подключение")
+            self.console.print("2. Через прокси")
+            pref = Prompt.ask("Выбор", default="1")
+            remote_config['preferred_connection'] = 'direct' if pref == "1" else 'proxy'
             
             self.save_config()
             self.console.print("[green]✅ Настройки сохранены[/green]")
@@ -1615,7 +1958,7 @@ for _, row in df.iterrows():
             if Confirm.ask("\nЗапустить полный пайплайн?"):
                 self.console.print("\n[cyan]Выберите режим:[/cyan]")
                 self.console.print("1. Только подготовка данных")
-                self.console.print("2. Подготовка данных + обучение")
+                self.console.print("2. Демо обучение (5 эпох)")
                 self.console.print("3. Полный пайплайн (данные + обучение + бэктест)")
                 
                 mode_choice = Prompt.ask("Выбор", default="2")
@@ -1623,7 +1966,15 @@ for _, row in df.iterrows():
                 if mode_choice == "1":
                     subprocess.run(["python", "run_full_pipeline.py", "--mode", "data"])
                 elif mode_choice == "2":
-                    subprocess.run(["python", "run_full_pipeline.py", "--mode", "demo"])
+                    # Для демо обучения меняем количество эпох
+                    original_epochs = self.config['model']['epochs']
+                    self.config['model']['epochs'] = 5
+                    self.save_config()
+                    try:
+                        subprocess.run(["python", "run_full_pipeline.py", "--mode", "train"])
+                    finally:
+                        self.config['model']['epochs'] = original_epochs
+                        self.save_config()
                 elif mode_choice == "3":
                     subprocess.run(["python", "run_full_pipeline.py", "--mode", "full"])
         else:
