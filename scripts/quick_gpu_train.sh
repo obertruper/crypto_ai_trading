@@ -18,13 +18,13 @@ fi
 
 # 2. Синхронизация если нужно
 echo -e "\n${YELLOW}Проверка синхронизации...${NC}"
-if ! ssh -p 41575 -i ~/.ssh/vast_ai_key root@184.98.25.179 "test -f /root/crypto_ai_trading/cache/features_cache.pkl" &>/dev/null; then
+if ! ssh -p 48937 -i ~/.ssh/vast_ai_key root@109.198.107.223 "test -f /root/crypto_ai_trading/cache/features_cache.pkl" &>/dev/null; then
     echo -e "${YELLOW}📤 Синхронизация проекта и кэша...${NC}"
     ./scripts/sync_to_vast.sh
     
     # Копируем кэш
     echo -e "${YELLOW}📦 Копирование кэша...${NC}"
-    scp -P 41575 -i ~/.ssh/vast_ai_key cache/features_cache.pkl root@184.98.25.179:/root/crypto_ai_trading/cache/
+    scp -P 48937 -i ~/.ssh/vast_ai_key cache/features_cache.pkl root@109.198.107.223:/root/crypto_ai_trading/cache/
 fi
 
 # 3. Запуск обучения
@@ -41,12 +41,12 @@ sleep 3
 
 # Устанавливаем туннель
 pkill -f "ssh.*6006"
-ssh -f -N -L 6006:localhost:6006 -p 41575 -i ~/.ssh/vast_ai_key root@184.98.25.179
+ssh -f -N -L 6006:localhost:6006 -p 48937 -i ~/.ssh/vast_ai_key root@109.198.107.223
 
 echo -e "\n${GREEN}✅ Готово!${NC}"
 echo -e "${BLUE}📊 TensorBoard: http://localhost:6006${NC}"
 echo -e "${YELLOW}💡 Для проверки логов:${NC}"
-echo "   ssh -p 41575 -i ~/.ssh/vast_ai_key root@184.98.25.179 'tmux attach -t training'"
+echo "   ssh -p 48937 -i ~/.ssh/vast_ai_key root@109.198.107.223 'tmux attach -t training'"
 
 # Открываем браузер
 if command -v open &> /dev/null; then

@@ -36,6 +36,7 @@ class TimeSeriesDataset(Dataset):
         self.data = data.sort_values(['symbol', 'datetime']).reset_index(drop=True)
         self.context_window = context_window
         self.prediction_window = prediction_window
+        self.target_window = prediction_window  # Добавляем target_window для совместимости
         self.stride = stride
         
         # Определение признаков и целевых переменных
@@ -94,19 +95,30 @@ class TimeSeriesDataset(Dataset):
         context_end = index_info['context_end_idx'] + 1
         context_data = self.data.iloc[context_start:context_end]
         
-        # Извлечение целевых данных
-        target_start = index_info['context_end_idx'] + 1
-        target_end = index_info['target_end_idx'] + 1
-        target_data = self.data.iloc[target_start:target_end]
+        # ИСПРАВЛЕНО: Целевые переменные берем из последней строки контекста
+        # а не из будущих строк!
         
         # Преобразование в тензоры
         X = torch.FloatTensor(context_data[self.feature_cols].values)
         
         # Обработка целевых переменных
         if len(self.target_cols) > 0:
-            y = torch.FloatTensor(target_data[self.target_cols].values)
+            # Берем целевые значения из ПОСЛЕДНЕЙ строки контекста
+            # Это значения future_return_X которые уже содержат будущую доходность
+            y_values = context_data.iloc[-1][self.target_cols].values
+            
+            # Если модель ожидает несколько временных шагов, дублируем значение
+            if self.target_window > 1:
+                y = torch.FloatTensor([y_values] * self.target_window)
+            else:
+                y = torch.FloatTensor([y_values])
         else:
             y = torch.FloatTensor([])
+        
+        # Данные для анализа (оставляем для совместимости)
+        target_start = index_info['context_end_idx'] + 1
+        target_end = index_info['target_end_idx'] + 1
+        target_data = self.data.iloc[target_start:target_end]
         
         # Дополнительная информация
         info = {
@@ -125,6 +137,7 @@ class TradingDataset(TimeSeriesDataset):
     
     def __init__(self, 
                  data: pd.DataFrame,
+                 config: Dict = None,
                  context_window: int = 168,
                  prediction_window: int = 4,
                  feature_cols: List[str] = None,
@@ -132,20 +145,109 @@ class TradingDataset(TimeSeriesDataset):
                  include_price_data: bool = True,
                  **kwargs):
         
-        # Определяем целевые переменные для торговли
-        # Используем доступные целевые переменные из данных
-        if target_cols is None:
-            # Автоматически находим целевые переменные
+        # КРИТИЧНОЕ ИСПРАВЛЕНИЕ: Правильная работа с одной целевой переменной
+        if target_cols is None and config is not None:
+            # Получаем целевую переменную из конфига
+            model_config = config.get('model', {})
+            target_variable = model_config.get('target_variable', 'future_return_4')
+            task_type = model_config.get('task_type', 'regression')
+            
+            # ИСПРАВЛЕНИЕ: Проверяем что целевая переменная существует в данных
+            if target_variable in data.columns:
+                trading_targets = [target_variable]
+                print(f"✅ Используется целевая переменная: {target_variable} (тип: {task_type})")
+            else:
+                # Fallback к доступным целевым переменным
+                available_targets = [col for col in data.columns 
+                                   if col.startswith(('target_', 'future_return_'))]
+                
+                if available_targets:
+                    # Приоритет: future_return_4 > future_return_3 > future_return_2 > future_return_1
+                    preferred_targets = ['future_return_4', 'future_return_3', 'future_return_2', 'future_return_1']
+                    trading_targets = None
+                    for pref_target in preferred_targets:
+                        if pref_target in available_targets:
+                            trading_targets = [pref_target]
+                            break
+                    
+                    if trading_targets is None:
+                        trading_targets = [available_targets[0]]  # Берем первую доступную
+                    
+                    print(f"⚠️  Целевая переменная {target_variable} не найдена. Используется: {trading_targets[0]}")
+                else:
+                    # КРИТИЧНОЕ ИСПРАВЛЕНИЕ: Создаем целевую переменную если её нет
+                    print("❌ Целевые переменные не найдены в данных! Создаем future_return_4...")
+                    
+                    # Создаем целевую переменную для каждого символа
+                    processed_dfs = []
+                    for symbol in data['symbol'].unique():
+                        symbol_data = data[data['symbol'] == symbol].copy().sort_values('datetime')
+                        
+                        # Создаем future_return_4
+                        symbol_data['future_close_4'] = symbol_data['close'].shift(-4)
+                        symbol_data['future_return_4'] = (
+                            (symbol_data['future_close_4'] / symbol_data['close'] - 1) * 100
+                        )
+                        
+                        processed_dfs.append(symbol_data)
+                    
+                    # Обновляем исходные данные
+                    data = pd.concat(processed_dfs, ignore_index=True)
+                    trading_targets = ['future_return_4']
+                    print(f"✅ Создана целевая переменная: future_return_4")
+                    
+        elif target_cols is None:
+            # Автоматически находим целевые переменные (старое поведение)
             available_targets = [col for col in data.columns 
                                if col.startswith(('target_', 'future_return_'))]
-            trading_targets = available_targets if available_targets else ['future_return_1', 'future_return_2', 'future_return_3', 'future_return_4']
+            
+            if available_targets:
+                # ИСПРАВЛЕНО: Используем только future_return_4 для совместимости с pred_len=4
+                if 'future_return_4' in available_targets:
+                    trading_targets = ['future_return_4']
+                else:
+                    # Fallback к любому future_return
+                    future_returns = [col for col in available_targets if 'future_return_' in col]
+                    trading_targets = future_returns[:1] if future_returns else [available_targets[0]]
+            else:
+                raise ValueError("❌ Целевые переменные не найдены в данных и config не предоставлен!")
         else:
             trading_targets = target_cols
         
+        # ИСПРАВЛЕНИЕ: Проверка размерности целей с конфигурацией модели
+        if config is not None:
+            expected_output_size = config.get('model', {}).get('output_size', 1)
+            if len(trading_targets) != expected_output_size:
+                print(f"⚠️  Несоответствие размерностей: target_cols={len(trading_targets)}, output_size={expected_output_size}")
+                
+                # Автоматическое исправление: берем только нужное количество целей
+                if len(trading_targets) > expected_output_size:
+                    trading_targets = trading_targets[:expected_output_size]
+                    print(f"🔧 Исправлено: используются первые {expected_output_size} целей: {trading_targets}")
+        
+        # ИСПРАВЛЕНИЕ: Обновляем data если были внесены изменения
+        if 'future_return_4' in trading_targets and 'future_return_4' not in data.columns:
+            print("⚠️  future_return_4 не найдена, создаем на лету...")
+            processed_dfs = []
+            for symbol in data['symbol'].unique():
+                symbol_data = data[data['symbol'] == symbol].copy().sort_values('datetime')
+                symbol_data['future_close_4'] = symbol_data['close'].shift(-4)
+                symbol_data['future_return_4'] = (
+                    (symbol_data['future_close_4'] / symbol_data['close'] - 1) * 100
+                )
+                processed_dfs.append(symbol_data)
+            data = pd.concat(processed_dfs, ignore_index=True)
+        
+        # Добавляем target_window если он передан в kwargs
+        if 'target_window' in kwargs:
+            target_window = kwargs.pop('target_window')
+        else:
+            target_window = prediction_window
+            
         super().__init__(
             data=data,
             context_window=context_window,
-            prediction_window=prediction_window,
+            prediction_window=target_window,
             feature_cols=feature_cols,
             target_cols=trading_targets,
             **kwargs
@@ -338,6 +440,7 @@ def create_data_loaders(train_data: pd.DataFrame,
     # Создание датасетов
     train_dataset = TradingDataset(
         data=train_data,
+        config=config,
         context_window=context_window,
         prediction_window=pred_window,
         feature_cols=feature_cols,
@@ -346,6 +449,7 @@ def create_data_loaders(train_data: pd.DataFrame,
     
     val_dataset = TradingDataset(
         data=val_data,
+        config=config,
         context_window=context_window,
         prediction_window=pred_window,
         feature_cols=feature_cols,
@@ -354,6 +458,7 @@ def create_data_loaders(train_data: pd.DataFrame,
     
     test_dataset = TradingDataset(
         data=test_data,
+        config=config,
         context_window=context_window,
         prediction_window=pred_window,
         feature_cols=feature_cols,

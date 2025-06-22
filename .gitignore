@@ -179,3 +179,16 @@ notebooks/data_exploration_summary.json
 notebooks/feature_importance_analysis.csv
 notebooks/recommended_features.json
 notebooks/evaluation_report_*.json
+# MCP files
+.mcp_memory/
+.env.mcp
+
+# LSP Server files
+lsp_server/venv/
+lsp_server/.lsp_data/
+lsp_server/.lsp_cache/
+lsp_server/*.log
+lsp_server/*.pid
+lsp_server/__pycache__/
+lsp_server/.mypy_cache/
+lsp_server/lsp_profile.json

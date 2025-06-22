@@ -21,7 +21,7 @@ fi
 
 # 2. Проверка подключения к серверу
 echo -e "\n2️⃣ Проверка подключения к серверу..."
-if ssh -o ConnectTimeout=5 -p 41575 -i ~/.ssh/vast_ai_key root@184.98.25.179 "echo 'OK'" &>/dev/null; then
+if ssh -o ConnectTimeout=5 -p 48937 -i ~/.ssh/vast_ai_key root@109.198.107.223 "echo 'OK'" &>/dev/null; then
     echo -e "${GREEN}✅ Подключение к серверу успешно${NC}"
 else
     echo -e "${RED}❌ Не удается подключиться к серверу${NC}"
@@ -41,7 +41,7 @@ fi
 
 # 4. Проверка проекта на сервере
 echo -e "\n4️⃣ Проверка проекта на сервере..."
-if ssh -p 41575 -i ~/.ssh/vast_ai_key root@184.98.25.179 "test -d /root/crypto_ai_trading" &>/dev/null; then
+if ssh -p 48937 -i ~/.ssh/vast_ai_key root@109.198.107.223 "test -d /root/crypto_ai_trading" &>/dev/null; then
     echo -e "${GREEN}✅ Проект найден на сервере${NC}"
 else
     echo -e "${YELLOW}⚠️  Проект не найден на сервере${NC}"
@@ -50,7 +50,7 @@ fi
 
 # 5. Проверка GPU на сервере
 echo -e "\n5️⃣ Проверка GPU..."
-GPU_INFO=$(ssh -p 41575 -i ~/.ssh/vast_ai_key root@184.98.25.179 "nvidia-smi --query-gpu=name --format=csv,noheader" 2>/dev/null)
+GPU_INFO=$(ssh -p 48937 -i ~/.ssh/vast_ai_key root@109.198.107.223 "nvidia-smi --query-gpu=name --format=csv,noheader" 2>/dev/null)
 if [ -n "$GPU_INFO" ]; then
     echo -e "${GREEN}✅ GPU доступны:${NC}"
     echo "$GPU_INFO" | sed 's/^/   /'

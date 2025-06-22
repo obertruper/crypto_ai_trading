@@ -131,7 +131,7 @@ class FlattenHead(nn.Module):
 
 
 class PatchTSTForPrediction(nn.Module):
-    """PatchTST модель для предсказания целевых переменных"""
+    """PatchTST модель для предсказания целевых переменных с защитой от переобучения"""
     
     def __init__(self,
                  c_in: int,  # количество входных признаков
@@ -145,6 +145,8 @@ class PatchTSTForPrediction(nn.Module):
                  n_heads: int = 8,
                  d_ff: int = 256,
                  dropout: float = 0.0,
+                 layer_dropout: float = 0.0,  # Stochastic depth
+                 weight_noise: float = 0.0,  # Noise regularization
                  **kwargs):
         super().__init__()
         
@@ -155,6 +157,8 @@ class PatchTSTForPrediction(nn.Module):
         self.patch_len = patch_len
         self.stride = stride
         self.d_model = d_model
+        self.layer_dropout = layer_dropout
+        self.weight_noise = weight_noise
         
         # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Фиксированное вычисление num_patches с валидацией
         self.num_patches = self._calculate_num_patches(context_window, patch_len, stride)

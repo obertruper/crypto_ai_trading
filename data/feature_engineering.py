@@ -8,6 +8,7 @@ import ta
 from typing import Dict, List, Tuple, Optional
 from scipy import stats
 from sklearn.preprocessing import StandardScaler, RobustScaler
+from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -443,7 +444,13 @@ class FeatureEngineer:
         """Создание целевых переменных для обучения"""
         risk_config = self.config['risk_management']
         
-        # Будущие цены
+        # ИСПРАВЛЕНО: Правильное вычисление будущей доходности
+        # Целевая переменная - доходность через 4 бара (1 час для 15-мин данных)
+        df['target_return_1h'] = df.groupby('symbol')['close'].transform(
+            lambda x: (x.shift(-4) / x - 1) * 100
+        )
+        
+        # Будущие цены для анализа (оставляем для совместимости)
         for horizon in range(1, 5):
             df[f'future_close_{horizon}'] = df.groupby('symbol')['close'].shift(-horizon)
             df[f'future_return_{horizon}'] = (
@@ -492,8 +499,8 @@ class FeatureEngineer:
         return df
     
     def _normalize_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """ИСПРАВЛЕННАЯ нормализация признаков с обработкой inf/nan"""
-        self.logger.info("Нормализация признаков...")
+        """ИСПРАВЛЕННАЯ нормализация БЕЗ DATA LEAKAGE - только для полного dataset"""
+        self.logger.warning("⚠️ ИСПОЛЬЗУЕТСЯ LEGACY МЕТОД! Для production используйте _normalize_walk_forward")
         
         # Столбцы для исключения из нормализации
         exclude_cols = [
@@ -513,63 +520,10 @@ class FeatureEngineer:
         # Определяем признаки для нормализации
         feature_cols = [col for col in df.columns if col not in exclude_cols]
         
-        # Нормализация по символам
-        for symbol in df['symbol'].unique():
-            mask = df['symbol'] == symbol
-            
-            if symbol not in self.scalers:
-                self.scalers[symbol] = RobustScaler()
-            
-            # Только валидные данные (без NaN и inf)
-            valid_mask = mask & df[feature_cols].notna().all(axis=1)
-            
-            if valid_mask.sum() > 0:
-                data_to_scale = df.loc[valid_mask, feature_cols].copy()
-                
-                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Тщательная очистка inf и экстремальных значений
-                for col in feature_cols:
-                    # 1. Заменяем inf на NaN
-                    data_to_scale[col] = data_to_scale[col].replace([np.inf, -np.inf], np.nan)
-                    
-                    # 2. Заполняем NaN медианой
-                    if data_to_scale[col].isna().any():
-                        median_val = data_to_scale[col].median()
-                        if pd.isna(median_val):  # Если все значения NaN
-                            median_val = 0.0
-                        data_to_scale[col] = data_to_scale[col].fillna(median_val)
-                    
-                    # 3. Более агрессивный клиппинг экстремальных значений
-                    q05 = data_to_scale[col].quantile(0.05)  # Изменено с 0.01 на 0.05
-                    q95 = data_to_scale[col].quantile(0.95)  # Изменено с 0.99 на 0.95
-                    
-                    # Проверяем валидность квантилей
-                    if pd.isna(q05) or pd.isna(q95) or q05 == q95:
-                        # Если квантили некорректны, используем симметричное клиппинг
-                        std_val = data_to_scale[col].std()
-                        mean_val = data_to_scale[col].mean()
-                        if pd.notna(std_val) and std_val > 0:
-                            q05 = mean_val - 3 * std_val
-                            q95 = mean_val + 3 * std_val
-                        else:
-                            q05, q95 = -1, 1  # Дефолтные значения
-                    
-                    data_to_scale[col] = data_to_scale[col].clip(lower=q05, upper=q95)
-                    
-                    # 4. Финальная проверка на inf (на всякий случай)
-                    if np.isinf(data_to_scale[col]).any():
-                        self.logger.warning(f"Обнаружены inf в {col} после обработки, заменяем на 0")
-                        data_to_scale[col] = data_to_scale[col].replace([np.inf, -np.inf], 0)
-                
-                # 5. Проверяем что данные готовы для скейлинга
-                if data_to_scale.shape[0] > 0 and not data_to_scale.isna().any().any():
-                    try:
-                        df.loc[valid_mask, feature_cols] = self.scalers[symbol].fit_transform(data_to_scale)
-                    except Exception as e:
-                        self.logger.error(f"Ошибка скейлинга для {symbol}: {e}")
-                        # Если скейлинг не удался, оставляем исходные данные
-                        df.loc[valid_mask, feature_cols] = data_to_scale.fillna(0)
-                else:
-                    self.logger.warning(f"Нет валидных данных для скейлинга {symbol}")
+        # ⚠️ ВНИМАНИЕ: Этот метод создает data leakage!
+        # Используйте create_features_with_train_split() для корректной обработки
+        self.logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Нормализация на всем датасете создает DATA LEAKAGE!")
+        self.logger.info("✅ Используйте метод create_features_with_train_split() вместо этого")
         
         return df
     
@@ -670,3 +624,209 @@ class FeatureEngineer:
             self.scalers = pickle.load(f)
         
         self.logger.info(f"Скейлеры загружены из {path}")
+    
+    def create_features_with_train_split(self, 
+                                       df: pd.DataFrame, 
+                                       train_ratio: float = 0.6,
+                                       val_ratio: float = 0.2) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """ИСПРАВЛЕННЫЙ метод создания признаков БЕЗ DATA LEAKAGE
+        
+        Args:
+            df: исходные данные
+            train_ratio: доля обучающих данных
+            val_ratio: доля валидационных данных
+            
+        Returns:
+            Tuple[train_data, val_data, test_data] - правильно нормализованные данные
+        """
+        self.logger.start_stage("feature_engineering_no_leakage", 
+                               symbols=df['symbol'].nunique())
+        
+        # 1. Создание признаков (без нормализации)
+        self.logger.info("1/5 - Создание базовых признаков...")
+        featured_dfs = []
+        
+        symbols = df['symbol'].unique()
+        self.logger.info(f"Обработка {len(symbols)} символов...")
+        
+        for symbol in tqdm(symbols, desc="Создание признаков", unit="символ"):
+            symbol_data = df[df['symbol'] == symbol].copy()
+            symbol_data = symbol_data.sort_values('datetime')
+            
+            symbol_data = self._create_basic_features(symbol_data)
+            symbol_data = self._create_technical_indicators(symbol_data)
+            symbol_data = self._create_microstructure_features(symbol_data)
+            symbol_data = self._create_temporal_features(symbol_data)
+            symbol_data = self._create_target_variables(symbol_data)
+            
+            featured_dfs.append(symbol_data)
+        
+        self.logger.info("2/5 - Объединение кросс-активных признаков...")
+        result_df = pd.concat(featured_dfs, ignore_index=True)
+        result_df = self._create_cross_asset_features(result_df)
+        
+        self.logger.info("3/5 - Обработка пропущенных значений...")
+        result_df = self._handle_missing_values(result_df)
+        
+        # 2. Разделение данных ПО ВРЕМЕНИ (критично для предотвращения data leakage)
+        self.logger.info("4/5 - Временное разделение данных...")
+        train_data_list = []
+        val_data_list = []
+        test_data_list = []
+        
+        for symbol in result_df['symbol'].unique():
+            symbol_data = result_df[result_df['symbol'] == symbol].sort_values('datetime')
+            n = len(symbol_data)
+            
+            train_end = int(n * train_ratio)
+            val_end = int(n * (train_ratio + val_ratio))
+            
+            train_data_list.append(symbol_data.iloc[:train_end])
+            val_data_list.append(symbol_data.iloc[train_end:val_end])
+            test_data_list.append(symbol_data.iloc[val_end:])
+        
+        train_data = pd.concat(train_data_list, ignore_index=True)
+        val_data = pd.concat(val_data_list, ignore_index=True)
+        test_data = pd.concat(test_data_list, ignore_index=True)
+        
+        # 3. ПРАВИЛЬНАЯ нормализация БЕЗ DATA LEAKAGE
+        self.logger.info("5/5 - Нормализация без data leakage...")
+        
+        # Определяем признаки для нормализации
+        exclude_cols = [
+            'id', 'symbol', 'timestamp', 'datetime', 'sector',
+            'open', 'high', 'low', 'close', 'volume', 'turnover'
+        ]
+        
+        # Целевые переменные
+        target_cols = [col for col in train_data.columns if col.startswith(('target_', 'future_', 'optimal_'))]
+        exclude_cols.extend(target_cols)
+        
+        # Временные колонки (уже нормализованы)
+        time_cols = ['hour', 'minute', 'dayofweek', 'day', 'month', 'is_weekend',
+                    'asian_session', 'european_session', 'american_session', 'session_overlap']
+        exclude_cols.extend(time_cols)
+        
+        feature_cols = [col for col in train_data.columns if col not in exclude_cols]
+        
+        # Нормализация по символам
+        unique_symbols = train_data['symbol'].unique()
+        for symbol in tqdm(unique_symbols, desc="Нормализация", unit="символ"):
+            
+            # Маски для каждого символа
+            train_mask = train_data['symbol'] == symbol
+            val_mask = val_data['symbol'] == symbol
+            test_mask = test_data['symbol'] == symbol
+            
+            if train_mask.sum() == 0:
+                continue
+            
+            # Обучаем scaler ТОЛЬКО на train данных
+            if symbol not in self.scalers:
+                self.scalers[symbol] = RobustScaler()
+            
+            # Получаем только валидные train данные
+            train_symbol_data = train_data.loc[train_mask, feature_cols].dropna()
+            
+            if len(train_symbol_data) > 0:
+                # Очистка экстремальных значений в train данных
+                train_cleaned = train_symbol_data.copy()
+                for col in feature_cols:
+                    # Клиппинг экстремальных значений
+                    q01 = train_cleaned[col].quantile(0.01)
+                    q99 = train_cleaned[col].quantile(0.99)
+                    train_cleaned[col] = train_cleaned[col].clip(lower=q01, upper=q99)
+                    
+                    # Замена inf на конечные значения
+                    train_cleaned[col] = train_cleaned[col].replace([np.inf, -np.inf], [q99, q01])
+                    train_cleaned[col] = train_cleaned[col].fillna(train_cleaned[col].median())
+                
+                # Обучаем scaler на очищенных train данных
+                self.scalers[symbol].fit(train_cleaned)
+                
+                # Применяем ко всем данным символа
+                # Train
+                train_valid_mask = train_mask & train_data[feature_cols].notna().all(axis=1)
+                if train_valid_mask.sum() > 0:
+                    train_to_scale = train_data.loc[train_valid_mask, feature_cols].copy()
+                    # Применяем ту же очистку
+                    for col in feature_cols:
+                        q01 = train_cleaned[col].quantile(0.01) if col in train_cleaned.columns else train_to_scale[col].quantile(0.01)
+                        q99 = train_cleaned[col].quantile(0.99) if col in train_cleaned.columns else train_to_scale[col].quantile(0.99)
+                        train_to_scale[col] = train_to_scale[col].clip(lower=q01, upper=q99)
+                        train_to_scale[col] = train_to_scale[col].replace([np.inf, -np.inf], [q99, q01])
+                        train_to_scale[col] = train_to_scale[col].fillna(train_to_scale[col].median())
+                    
+                    train_data.loc[train_valid_mask, feature_cols] = self.scalers[symbol].transform(train_to_scale)
+                
+                # Val 
+                val_valid_mask = val_mask & val_data[feature_cols].notna().all(axis=1)
+                if val_valid_mask.sum() > 0:
+                    val_to_scale = val_data.loc[val_valid_mask, feature_cols].copy()
+                    # Применяем ту же очистку используя статистики из train
+                    for col in feature_cols:
+                        q01 = train_cleaned[col].quantile(0.01) if col in train_cleaned.columns else val_to_scale[col].quantile(0.01)
+                        q99 = train_cleaned[col].quantile(0.99) if col in train_cleaned.columns else val_to_scale[col].quantile(0.99)
+                        val_to_scale[col] = val_to_scale[col].clip(lower=q01, upper=q99)
+                        val_to_scale[col] = val_to_scale[col].replace([np.inf, -np.inf], [q99, q01])
+                        val_to_scale[col] = val_to_scale[col].fillna(val_to_scale[col].median())
+                    
+                    val_data.loc[val_valid_mask, feature_cols] = self.scalers[symbol].transform(val_to_scale)
+                
+                # Test
+                test_valid_mask = test_mask & test_data[feature_cols].notna().all(axis=1)
+                if test_valid_mask.sum() > 0:
+                    test_to_scale = test_data.loc[test_valid_mask, feature_cols].copy()
+                    # Применяем ту же очистку используя статистики из train
+                    for col in feature_cols:
+                        q01 = train_cleaned[col].quantile(0.01) if col in train_cleaned.columns else test_to_scale[col].quantile(0.01)
+                        q99 = train_cleaned[col].quantile(0.99) if col in train_cleaned.columns else test_to_scale[col].quantile(0.99)
+                        test_to_scale[col] = test_to_scale[col].clip(lower=q01, upper=q99)
+                        test_to_scale[col] = test_to_scale[col].replace([np.inf, -np.inf], [q99, q01])
+                        test_to_scale[col] = test_to_scale[col].fillna(test_to_scale[col].median())
+                    
+                    test_data.loc[test_valid_mask, feature_cols] = self.scalers[symbol].transform(test_to_scale)
+        
+        # КРИТИЧНО: Удаляем строки с NaN в future переменных
+        # NaN появляются в последних N строках каждого символа из-за shift(-N)
+        future_cols = [col for col in train_data.columns if col.startswith('future_')]
+        if future_cols:
+            self.logger.info("🧑 Удаление строк с NaN в целевых переменных...")
+            
+            # Подсчет до удаления
+            train_before = len(train_data)
+            val_before = len(val_data)
+            test_before = len(test_data)
+            
+            # Удаляем строки с NaN в любой из future колонок
+            train_data = train_data.dropna(subset=future_cols)
+            val_data = val_data.dropna(subset=future_cols)
+            test_data = test_data.dropna(subset=future_cols)
+            
+            self.logger.info(f"  Удалено строк: Train={train_before - len(train_data)}, "
+                           f"Val={val_before - len(val_data)}, Test={test_before - len(test_data)}")
+        
+        # Проверка на оставшиеся NaN
+        nan_check = {
+            'train': train_data.isna().sum().sum(),
+            'val': val_data.isna().sum().sum(),
+            'test': test_data.isna().sum().sum()
+        }
+        
+        for split, nan_count in nan_check.items():
+            if nan_count > 0:
+                self.logger.warning(f"⚠️  Осталось {nan_count} NaN в {split} данных")
+        
+        # Финальная статистика
+        self.logger.info(f"✅ Размеры данных без data leakage:")
+        self.logger.info(f"   - Train: {len(train_data)} записей")
+        self.logger.info(f"   - Val: {len(val_data)} записей") 
+        self.logger.info(f"   - Test: {len(test_data)} записей")
+        self.logger.info(f"   - Признаков: {len(feature_cols)}")
+        
+        self.logger.end_stage("feature_engineering_no_leakage", 
+                            train_size=len(train_data),
+                            val_size=len(val_data),
+                            test_size=len(test_data))
+        
+        return train_data, val_data, test_data

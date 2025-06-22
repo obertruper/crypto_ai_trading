@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Главный скрипт для запуска AI системы прогнозирования криптофьючерсов
+Crypto AI Trading System - Универсальная точка входа
+Защита от переобучения встроена в архитектуру
 """
 
 import argparse
@@ -15,13 +16,16 @@ warnings.filterwarnings('ignore')
 
 from utils.logger import get_logger
 
+# Версия системы
+__version__ = "2.0.0"
+
 def load_config(config_path: str) -> dict:
     """Загрузка конфигурации"""
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
 def prepare_data(config: dict, logger):
-    """Подготовка данных для обучения"""
+    """Подготовка данных для обучения с защитой от data leakage"""
     logger.start_stage("data_preparation")
     
     logger.info("📥 Загрузка данных из PostgreSQL...")
@@ -36,10 +40,12 @@ def prepare_data(config: dict, logger):
     # Получаем список символов
     if config['data']['symbols'] == 'all':
         available_symbols = data_loader.get_available_symbols()
-        symbols_to_load = available_symbols[:5]  # Первые 5 для тестирования
-        logger.info(f"📊 Загружаем первые 5 символов из {len(available_symbols)}: {symbols_to_load}")
+        # Ограничиваем количество символов для демо
+        max_symbols = config.get('data', {}).get('max_symbols', 10)
+        symbols_to_load = available_symbols[:max_symbols]
+        logger.info(f"📊 Загружаем первые {max_symbols} символов из {len(available_symbols)}: {symbols_to_load}")
     else:
-        symbols_to_load = config['data']['symbols'][:5]
+        symbols_to_load = config['data']['symbols']
         logger.info(f"📊 Загружаем указанные символы: {symbols_to_load}")
     
     raw_data = data_loader.load_data(
@@ -55,45 +61,17 @@ def prepare_data(config: dict, logger):
         if report['anomalies']:
             logger.warning(f"Аномалии в данных {symbol}: {report['anomalies']}")
     
-    logger.info("🛠️ Создание признаков...")
+    logger.info("🛠️ Создание признаков с защитой от data leakage...")
     feature_engineer = FeatureEngineer(config)
-    featured_data = feature_engineer.create_features(raw_data)
     
-    logger.info("✂️ Разделение данных на train/val/test...")
-    
-    # Разделение данных
-    train_ratio = config['data']['train_ratio']
-    val_ratio = config['data']['val_ratio']
-    test_ratio = config['data']['test_ratio']
-    
-    # Сортировка по времени для правильного разделения
-    featured_data = featured_data.sort_values(['symbol', 'datetime']).reset_index(drop=True)
-    
-    # Разделение по символам
-    train_data_list = []
-    val_data_list = []
-    test_data_list = []
-    
-    for symbol in featured_data['symbol'].unique():
-        symbol_data = featured_data[featured_data['symbol'] == symbol]
-        n = len(symbol_data)
-        
-        train_end = int(n * train_ratio)
-        val_end = int(n * (train_ratio + val_ratio))
-        
-        train_data_list.append(symbol_data.iloc[:train_end])
-        val_data_list.append(symbol_data.iloc[train_end:val_end])
-        test_data_list.append(symbol_data.iloc[val_end:])
-    
-    train_data = pd.concat(train_data_list, ignore_index=True)
-    val_data = pd.concat(val_data_list, ignore_index=True)
-    test_data = pd.concat(test_data_list, ignore_index=True)
+    # Используем новый метод с защитой от data leakage
+    train_data, val_data, test_data = feature_engineer.create_features_with_train_split(
+        raw_data,
+        train_ratio=config['data']['train_ratio'],
+        val_ratio=config['data']['val_ratio']
+    )
     
     logger.info("🏗️ Создание datasets...")
-    
-    # Определение целевых переменных
-    target_cols = [col for col in featured_data.columns 
-                  if col.startswith(('target_', 'future_return_'))]
     
     # Создание DataLoader'ов
     train_loader, val_loader, test_loader = create_data_loaders(

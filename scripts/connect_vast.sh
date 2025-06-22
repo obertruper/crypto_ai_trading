@@ -17,18 +17,18 @@ if [ -n "$VAST_CONNECTION_MODE" ]; then
 else
     # Интерактивный выбор
     echo -e "\n${YELLOW}Выберите способ подключения:${NC}"
-    echo "1) Прямое подключение (184.98.25.179:41575)"
-    echo "2) Через прокси (ssh8.vast.ai:13641)"
+    echo "1) Прямое подключение (109.198.107.223:48937)"
+    echo "2) Через альтернативный сервер (ssh1.vast.ai:30421)"
     echo -n "Выбор (1/2): "
     read choice
 fi
 
 if [ "$choice" = "1" ]; then
-    HOST="184.98.25.179"
-    PORT="41575"
+    HOST="109.198.107.223"
+    PORT="48937"
 else
-    HOST="ssh8.vast.ai"
-    PORT="13641"
+    HOST="ssh1.vast.ai"
+    PORT="30421"
 fi
 
 # Используем стандартный ключ id_rsa

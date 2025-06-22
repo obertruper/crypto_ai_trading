@@ -86,10 +86,13 @@ class Trainer:
             'learning_rates': []
         }
         
-        # Early stopping
+        # Early stopping (улучшенная версия для борьбы с переобучением)
         self.best_val_loss = float('inf')
         self.patience_counter = 0
         self.best_model_state = None
+        self.min_delta = config['model'].get('min_delta', 1e-4)  # Минимальное улучшение
+        self.overfitting_threshold = config['model'].get('overfitting_threshold', 0.1)  # Порог переобучения
+        self.consecutive_overfitting = 0  # Счетчик последовательного переобучения
         
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Создание оптимизатора"""
@@ -176,6 +179,11 @@ class Trainer:
             elif isinstance(targets, dict):
                 targets = {k: v.to(self.device) for k, v in targets.items()}
             
+            # Проверка входных данных на NaN
+            if torch.isnan(inputs).any():
+                self.logger.warning(f"NaN во входных данных батча {batch_idx}, пропускаем")
+                continue
+                
             # Forward pass
             if self.use_amp:
                 with autocast():
@@ -184,6 +192,15 @@ class Trainer:
             else:
                 outputs = self.model(inputs)
                 loss = self._compute_loss(outputs, targets)
+            
+            # Проверка на NaN/Inf
+            if torch.isnan(loss) or torch.isinf(loss):
+                self.logger.warning(f"Loss is NaN/Inf at batch {batch_idx}: {loss.item()}")
+                # Дополнительная диагностика
+                self.logger.warning(f"  Outputs stats: min={outputs.min().item():.4f}, max={outputs.max().item():.4f}, mean={outputs.mean().item():.4f}")
+                if isinstance(targets, torch.Tensor):
+                    self.logger.warning(f"  Targets stats: min={targets.min().item():.4f}, max={targets.max().item():.4f}, mean={targets.mean().item():.4f}")
+                continue  # Пропускаем этот батч
             
             # Backward pass
             self.optimizer.zero_grad()
@@ -201,9 +218,11 @@ class Trainer:
             else:
                 loss.backward()
                 
-                # Gradient clipping
+                # Gradient clipping с дополнительной проверкой
                 if self.gradient_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
+                    if grad_norm > self.gradient_clip * 10:  # Слишком большие градиенты
+                        self.logger.warning(f"Очень большая норма градиента: {grad_norm:.4f}")
                 
                 self.optimizer.step()
             
@@ -325,6 +344,12 @@ class Trainer:
             # Проверка и выравнивание размерностей
             outputs, targets = self._align_dimensions(outputs, targets)
             
+            # Дополнительная проверка на NaN перед вычислением loss
+            if torch.isnan(outputs).any() or torch.isnan(targets).any():
+                self.logger.warning("NaN обнаружены в outputs или targets перед вычислением loss")
+                # Возвращаем большую но конечную loss вместо NaN
+                return torch.tensor(1e6, device=outputs.device, requires_grad=True)
+            
             return self.criterion(outputs, targets)
     
     def _align_dimensions(self, outputs: torch.Tensor, targets: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -396,13 +421,19 @@ class Trainer:
             val_metrics = self.validate(val_loader)
             
             # Обновление learning rate
+            current_lr = self.optimizer.param_groups[0]['lr']  # Инициализация перед использованием
+            
             if self.scheduler is not None:
                 if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    old_lr = current_lr  # Сохраняем старое значение
                     self.scheduler.step(val_metrics['loss'])
+                    # Проверяем изменение LR
+                    current_lr = self.optimizer.param_groups[0]['lr']
+                    if old_lr != current_lr:
+                        self.logger.info(f"📉 Learning rate снижен с {old_lr:.2e} до {current_lr:.2e}")
                 else:
                     self.scheduler.step()
-            
-            current_lr = self.optimizer.param_groups[0]['lr']
+                    current_lr = self.optimizer.param_groups[0]['lr']
             
             # Сохранение истории
             self.history['train_loss'].append(train_metrics['loss'])
@@ -411,14 +442,47 @@ class Trainer:
             self.history['val_metrics'].append(val_metrics)
             self.history['learning_rates'].append(current_lr)
             
-            # Early stopping
-            if val_metrics['loss'] < self.best_val_loss:
+            # Улучшенная логика борьбы с переобучением
+            improvement = self.best_val_loss - val_metrics['loss']
+            overfitting_ratio = val_metrics['loss'] / train_metrics['loss'] if train_metrics['loss'] > 0 else 1.0
+            
+            # Логирование метрик для отладки
+            self.logger.info(f"📊 Метрики эпохи {epoch + 1}: train_loss={train_metrics['loss']:.4f}, val_loss={val_metrics['loss']:.4f}, "
+                           f"overfitting_ratio={overfitting_ratio:.3f}, improvement={improvement:.6f}")
+            
+            if improvement > self.min_delta:
+                # Значительное улучшение
                 self.best_val_loss = val_metrics['loss']
                 self.patience_counter = 0
+                self.consecutive_overfitting = 0
                 self.best_model_state = self.model.state_dict().copy()
                 self._save_checkpoint(epoch, val_metrics['loss'], is_best=True)
+                self.logger.info(f"✅ Новая лучшая модель! Val loss улучшен на {improvement:.6f}")
             else:
                 self.patience_counter += 1
+                
+                # Проверка на переобучение с "прогревом"
+                # Не проверяем переобучение первые 3 эпохи - даем модели стабилизироваться
+                if epoch >= 3:  # Начинаем проверку только после 3-й эпохи
+                    if overfitting_ratio > (1.0 + self.overfitting_threshold):
+                        self.consecutive_overfitting += 1
+                        self.logger.warning(f"⚠️  Обнаружено переобучение! Train: {train_metrics['loss']:.4f}, Val: {val_metrics['loss']:.4f} (ratio: {overfitting_ratio:.3f})")
+                        
+                        # Останавливаемся только после 3 последовательных обнаружений
+                        if self.consecutive_overfitting >= 3:
+                            self.logger.info(f"🛑 Остановка из-за устойчивого переобучения (3 эпохи подряд)")
+                            break
+                    else:
+                        self.consecutive_overfitting = 0
+                else:
+                    # Первые 3 эпохи - только информационное сообщение
+                    if overfitting_ratio > 1.5:  # 50% разница
+                        self.logger.info(f"📈 Эпоха {epoch + 1}: высокий val_loss относительно train_loss (ratio: {overfitting_ratio:.3f}), но это нормально в начале обучения")
+            
+            # КРИТИЧНО: Дополнительная проверка - если val_loss не улучшается слишком долго
+            if self.patience_counter >= self.early_stopping_patience:
+                self.logger.info(f"🛑 Early stopping: val_loss не улучшается {self.patience_counter} эпох (patience={self.early_stopping_patience})")
+                break
             
             # Логирование
             epoch_time = time.time() - epoch_start_time
@@ -436,11 +500,6 @@ class Trainer:
             if callbacks:
                 for callback in callbacks:
                     callback(self, epoch, train_metrics, val_metrics)
-            
-            # Early stopping check
-            if self.patience_counter >= self.early_stopping_patience:
-                self.logger.info(f"Early stopping triggered at epoch {epoch + 1}")
-                break
         
         # Восстановление лучшей модели
         if self.best_model_state is not None:

@@ -80,8 +80,8 @@ class CryptoTradingMenu:
         remote_config = self.config.get('remote_server', {})
         direct_config = remote_config.get('direct_connection', {})
         
-        self.ssh_host = direct_config.get('host', '184.98.25.179')
-        self.ssh_port = str(direct_config.get('port', 41575))
+        self.ssh_host = direct_config.get('host', '109.198.107.223')
+        self.ssh_port = str(direct_config.get('port', 48937))
         self.ssh_user = direct_config.get('user', 'root')
         self.ssh_key_path = direct_config.get('key_path', '~/.ssh/id_rsa')
         self.current_server_profile = None
@@ -477,10 +477,11 @@ except:
         """Быстрое демо обучение"""
         self.console.print("\n[cyan]Запуск демо обучения (5 эпох)...[/cyan]")
         
-        # Временно меняем конфигурацию
-        original_epochs = self.config['model']['epochs']
-        self.config['model']['epochs'] = 5
-        self.save_config()
+        # Используем количество эпох из конфигурации
+        # Закомментировано для использования значения из config.yaml
+        # original_epochs = self.config['model']['epochs']
+        # self.config['model']['epochs'] = 5
+        # self.save_config()
         
         try:
             # Запускаем обучение в фоне
@@ -633,8 +634,8 @@ except:
         
         self.console.print("\n[cyan]Текущие настройки подключения:[/cyan]")
         self.console.print("\n[bold]Прямое подключение:[/bold]")
-        self.console.print(f"  Host: {direct_config.get('host', '184.98.25.179')}")
-        self.console.print(f"  Port: {direct_config.get('port', 41575)}")
+        self.console.print(f"  Host: {direct_config.get('host', '109.198.107.223')}")
+        self.console.print(f"  Port: {direct_config.get('port', 48937)}")
         
         if proxy_config:
             self.console.print("\n[bold]Подключение через прокси:[/bold]")
@@ -644,8 +645,8 @@ except:
         if Confirm.ask("\nИзменить настройки?"):
             # Настройка прямого подключения
             self.console.print("\n[cyan]Настройка прямого подключения:[/cyan]")
-            direct_host = Prompt.ask("IP адрес сервера", default=direct_config.get('host', "184.98.25.179"))
-            direct_port = IntPrompt.ask("SSH порт", default=direct_config.get('port', 41575))
+            direct_host = Prompt.ask("IP адрес сервера", default=direct_config.get('host', "109.198.107.223"))
+            direct_port = IntPrompt.ask("SSH порт", default=direct_config.get('port', 48937))
             
             # Спрашиваем про прокси
             if Confirm.ask("\nНастроить альтернативное подключение через прокси?"):
@@ -1278,10 +1279,10 @@ for _, row in df.iterrows():
             # Получаем параметры подключения из конфига
             remote_config = self.config.get('remote_server', {})
             
-            # Определяем способ подключения - пробуем прямое, потом прокси
+            # Определяем способ подключения - пробуем новые серверы
             connections = [
-                ("184.98.25.179", 41575),  # Прямое подключение
-                ("ssh8.vast.ai", 13641)     # Через прокси
+                ("109.198.107.223", 48937),  # Основной сервер
+                ("ssh1.vast.ai", 30421)       # Альтернативный сервер
             ]
             
             for host, port in connections:
@@ -1727,8 +1728,8 @@ python3 run_full_pipeline.py --mode train 2>&1 | tee logs/training_gpu_{datetime
         
         self.console.print("\n[cyan]Текущие настройки подключения:[/cyan]")
         self.console.print("\n[bold]Прямое подключение:[/bold]")
-        self.console.print(f"  Host: {direct_config.get('host', '184.98.25.179')}")
-        self.console.print(f"  Port: {direct_config.get('port', 41575)}")
+        self.console.print(f"  Host: {direct_config.get('host', '109.198.107.223')}")
+        self.console.print(f"  Port: {direct_config.get('port', 48937)}")
         
         if proxy_config:
             self.console.print("\n[bold]Подключение через прокси:[/bold]")
@@ -1738,8 +1739,8 @@ python3 run_full_pipeline.py --mode train 2>&1 | tee logs/training_gpu_{datetime
         if Confirm.ask("\nИзменить настройки?"):
             # Настройка прямого подключения
             self.console.print("\n[cyan]Настройка прямого подключения:[/cyan]")
-            direct_host = Prompt.ask("IP адрес сервера", default=direct_config.get('host', "184.98.25.179"))
-            direct_port = IntPrompt.ask("SSH порт", default=direct_config.get('port', 41575))
+            direct_host = Prompt.ask("IP адрес сервера", default=direct_config.get('host', "109.198.107.223"))
+            direct_port = IntPrompt.ask("SSH порт", default=direct_config.get('port', 48937))
             
             # Спрашиваем про прокси
             if Confirm.ask("\nНастроить альтернативное подключение через прокси?"):
@@ -1966,15 +1967,12 @@ python3 run_full_pipeline.py --mode train 2>&1 | tee logs/training_gpu_{datetime
                 if mode_choice == "1":
                     subprocess.run(["python", "run_full_pipeline.py", "--mode", "data"])
                 elif mode_choice == "2":
-                    # Для демо обучения меняем количество эпох
-                    original_epochs = self.config['model']['epochs']
-                    self.config['model']['epochs'] = 5
-                    self.save_config()
-                    try:
-                        subprocess.run(["python", "run_full_pipeline.py", "--mode", "train"])
-                    finally:
-                        self.config['model']['epochs'] = original_epochs
-                        self.save_config()
+                    # Для демо обучения используем эпохи из конфигурации
+                    # Закомментировано для гибкости
+                    # original_epochs = self.config['model']['epochs']
+                    # self.config['model']['epochs'] = 5
+                    # self.save_config()
+                    subprocess.run(["python", "run_full_pipeline.py", "--mode", "train"])
                 elif mode_choice == "3":
                     subprocess.run(["python", "run_full_pipeline.py", "--mode", "full"])
         else:
