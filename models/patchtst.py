@@ -40,6 +40,102 @@ def manual_repeat_t_n(tensor, n):
     # tensor shape: (T,) -> (T, N)
     return tensor.unsqueeze(1).expand(-1, n)
 
+
+# ===== КЛАССЫ УЛУЧШЕНИЙ ИЗ patchtst_improved.py =====
+
+class FeatureAttention(nn.Module):
+    """Механизм внимания для выбора важных признаков"""
+    
+    def __init__(self, n_features: int, d_model: int, dropout: float = 0.1):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(n_features, d_model),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, n_features),
+            nn.Softmax(dim=-1)
+        )
+        
+    def forward(self, x):
+        # x: (B, L, C)
+        # Вычисляем веса внимания для каждого временного шага
+        weights = self.attention(x)  # (B, L, C)
+        # Применяем веса
+        return x * weights
+
+
+class ImprovedPatchEmbedding(nn.Module):
+    """Улучшенное создание патчей с многомасштабным подходом"""
+    
+    def __init__(self, d_model: int, patch_len: int, stride: int, 
+                 n_features: int, dropout: float = 0.0):
+        super().__init__()
+        self.patch_len = patch_len
+        self.stride = stride
+        
+        # Основная проекция патчей
+        self.patch_proj = nn.Linear(patch_len, d_model)
+        
+        # Дополнительные проекции для разных масштабов
+        self.multi_scale = nn.ModuleList([
+            nn.Conv1d(n_features, d_model // 4, kernel_size=k, stride=1, padding=k//2)
+            for k in [3, 5, 7, 9]
+        ])
+        
+        self.fusion = nn.Linear(d_model * 2, d_model)
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x):
+        # x: (B, L, C)
+        B, L, C = x.shape
+        
+        # Создание основных патчей
+        num_patches = (L - self.patch_len) // self.stride + 1
+        patches = x.unfold(dimension=1, size=self.patch_len, step=self.stride)
+        # patches: (B, num_patches, C, patch_len)
+        
+        # Проекция патчей для каждого канала
+        if EINOPS_AVAILABLE:
+            patches = rearrange(patches, 'b n c p -> (b c) n p')
+        else:
+            patches = manual_rearrange_b_n_c_p_to_bc_n_p(patches)
+            
+        patch_embeds = self.patch_proj(patches)  # (B*C, num_patches, d_model)
+        
+        # Многомасштабные признаки
+        x_conv = x.transpose(1, 2)  # (B, C, L)
+        multi_scale_features = []
+        for conv in self.multi_scale:
+            feat = conv(x_conv)  # (B, d_model//4, L')
+            feat = F.adaptive_avg_pool1d(feat, num_patches)  # (B, d_model//4, num_patches)
+            multi_scale_features.append(feat)
+        
+        multi_scale_features = torch.cat(multi_scale_features, dim=1)  # (B, d_model, num_patches)
+        multi_scale_features = multi_scale_features.transpose(1, 2)  # (B, num_patches, d_model)
+        
+        # Объединение признаков
+        if EINOPS_AVAILABLE:
+            patch_embeds = rearrange(patch_embeds, '(b c) n d -> b n (c d)', c=C)
+        else:
+            BC, N, D = patch_embeds.shape
+            patch_embeds = patch_embeds.view(B, C, N, D).permute(0, 2, 1, 3).contiguous()
+            patch_embeds = patch_embeds.view(B, N, C * D)
+        
+        # Уменьшаем размерность до d_model
+        patch_embeds = self.fusion(patch_embeds)  # (B, num_patches, d_model)
+        
+        # Комбинируем с многомасштабными признаками
+        combined = patch_embeds + multi_scale_features
+        combined = self.norm(combined)
+        combined = self.dropout(combined)
+        
+        return combined
+
+
+# ===== КОНЕЦ КЛАССОВ УЛУЧШЕНИЙ =====
+
+
 class PositionalEncoding(nn.Module):
     """Позиционное кодирование для трансформера"""
     
@@ -169,14 +265,34 @@ class PatchTSTForPrediction(nn.Module):
                 f"patch_len={patch_len}, stride={stride} -> num_patches={self.num_patches}"
             )
         
-        # Patch embedding
-        self.patch_embedding = PatchEmbedding(
-            patch_len=patch_len,
-            stride=stride,
-            in_channels=c_in,
-            embed_dim=d_model,
-            norm_layer=nn.LayerNorm
-        )
+        # Получаем параметры улучшений из конфигурации
+        self.use_improvements = kwargs.get('use_improvements', False)
+        self.feature_attention_enabled = kwargs.get('feature_attention', False)
+        self.multi_scale_patches = kwargs.get('multi_scale_patches', False)
+        
+        # Feature attention (если включено)
+        if self.use_improvements and self.feature_attention_enabled:
+            self.feature_attention = FeatureAttention(c_in, d_model, dropout)
+        else:
+            self.feature_attention = None
+            
+        # Patch embedding (обычный или улучшенный)
+        if self.use_improvements and self.multi_scale_patches:
+            self.patch_embedding = ImprovedPatchEmbedding(
+                d_model=d_model,
+                patch_len=patch_len,
+                stride=stride,
+                n_features=c_in,
+                dropout=dropout
+            )
+        else:
+            self.patch_embedding = PatchEmbedding(
+                patch_len=patch_len,
+                stride=stride,
+                in_channels=c_in,
+                embed_dim=d_model,
+                norm_layer=nn.LayerNorm
+            )
         
         # Positional encoding
         self.pos_encoding = PositionalEncoding(d_model, max_len=self.num_patches)
@@ -231,8 +347,18 @@ class PatchTSTForPrediction(nn.Module):
         x_std = x.std(dim=1, keepdim=True) + 1e-5
         x_norm = (x - x_mean) / x_std
         
+        # Применяем feature attention если включено
+        if self.feature_attention is not None:
+            x_norm = self.feature_attention(x_norm)
+        
         # Создание патчей
-        x_patches, actual_num_patches = self.patch_embedding(x_norm)
+        if isinstance(self.patch_embedding, ImprovedPatchEmbedding):
+            # Улучшенная версия возвращает только патчи
+            x_patches = self.patch_embedding(x_norm)
+            actual_num_patches = x_patches.size(1)
+        else:
+            # Обычная версия возвращает патчи и количество
+            x_patches, actual_num_patches = self.patch_embedding(x_norm)
         # x_patches: (B*N, actual_num_patches, d_model)
         
         # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Строгая проверка без изменения архитектуры
@@ -309,7 +435,11 @@ def create_patchtst_model(config: Dict) -> PatchTSTForPrediction:
         d_model=model_config.get('d_model', 128),
         n_heads=model_config.get('n_heads', 8),
         d_ff=model_config.get('d_ff', 512),
-        dropout=model_config.get('dropout', 0.1)
+        dropout=model_config.get('dropout', 0.1),
+        # Параметры улучшений
+        use_improvements=model_config.get('use_improvements', False),
+        feature_attention=model_config.get('feature_attention', False),
+        multi_scale_patches=model_config.get('multi_scale_patches', False)
     )
     
     return model

@@ -2,10 +2,11 @@
 Валидация конфигурации с использованием Pydantic
 """
 
-from pydantic import BaseModel, validator, Field
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, validator, Field, ValidationError
+from typing import List, Optional, Dict, Any, Union
 import yaml
 from pathlib import Path
+import logging
 
 
 class DatabaseConfig(BaseModel):
@@ -190,3 +191,36 @@ def validate_dataframe(df, required_columns: List[str], context: str = ""):
         if col in df.columns and df[col].isna().any():
             nan_count = df[col].isna().sum()
             raise ValueError(f"Обнаружено {nan_count} NaN значений в колонке {col} ({context})")
+
+
+def validate_config(config: Union[dict, Config]) -> bool:
+    """Валидация конфигурации
+    
+    Args:
+        config: Словарь конфигурации или объект Config
+        
+    Returns:
+        bool: True если конфигурация валидна
+    """
+    try:
+        if isinstance(config, dict):
+            # Пытаемся создать объект Config из словаря
+            Config(**config)
+        elif isinstance(config, Config):
+            # Уже валидированный объект
+            pass
+        else:
+            raise ValueError("config должен быть dict или Config")
+        
+        logging.info("✅ Конфигурация валидна")
+        return True
+        
+    except ValidationError as e:
+        logging.error(f"❌ Ошибки валидации конфигурации:")
+        for error in e.errors():
+            field_path = " -> ".join(str(loc) for loc in error['loc'])
+            logging.error(f"  {field_path}: {error['msg']}")
+        return False
+    except Exception as e:
+        logging.error(f"❌ Ошибка при валидации: {str(e)}")
+        return False

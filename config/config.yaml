@@ -182,6 +182,10 @@ model:
   label_smoothing: 0.1
   mixup_alpha: 0.2
   weight_noise: 0.01
+  # Параметры для улучшенной версии PatchTST
+  use_improvements: true  # Использовать улучшения из patchtst_improved
+  feature_attention: true  # Использовать FeatureAttention
+  multi_scale_patches: true  # Использовать многомасштабные патчи
 optimizer:
   name: AdamW
   params:

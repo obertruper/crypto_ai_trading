@@ -122,7 +122,11 @@ def train_model(config: dict, train_loader, val_loader, logger):
         d_model=config['model']['d_model'],
         n_heads=config['model']['n_heads'],
         d_ff=config['model']['d_ff'],
-        dropout=config['model']['dropout']
+        dropout=config['model']['dropout'],
+        # Параметры улучшений
+        use_improvements=config['model'].get('use_improvements', False),
+        feature_attention=config['model'].get('feature_attention', False),
+        multi_scale_patches=config['model'].get('multi_scale_patches', False)
     )
     
     # Создание трейнера
@@ -248,14 +252,24 @@ def main():
     parser.add_argument('--config', type=str, default='config/config.yaml',
                        help='Путь к файлу конфигурации')
     parser.add_argument('--mode', type=str, default='full',
-                       choices=['data', 'train', 'backtest', 'full', 'demo'],
+                       choices=['data', 'train', 'backtest', 'full', 'demo', 'interactive'],
                        help='Режим работы')
     parser.add_argument('--model-path', type=str, default=None,
                        help='Путь к сохраненной модели (для режима backtest)')
+    parser.add_argument('--use-improved-model', action='store_true',
+                       help='Использовать улучшенную версию модели с FeatureAttention')
+    parser.add_argument('--validate-only', action='store_true',
+                       help='Только валидация конфигурации без запуска')
     
     args = parser.parse_args()
     
     config = load_config(args.config)
+    
+    # Применяем флаг улучшенной модели к конфигурации
+    if args.use_improved_model:
+        config['model']['use_improvements'] = True
+        config['model']['feature_attention'] = True
+        config['model']['multi_scale_patches'] = True
     
     logger = get_logger("CryptoAI")
     
@@ -263,7 +277,27 @@ def main():
     logger.info("🚀 Запуск Crypto AI Trading System")
     logger.info(f"📋 Режим: {args.mode}")
     logger.info(f"⚙️ Конфигурация: {args.config}")
+    if args.use_improved_model:
+        logger.info("🔥 Используется улучшенная модель с FeatureAttention")
     logger.info("="*80)
+    
+    # Валидация конфигурации
+    if args.validate_only:
+        logger.info("🔍 Режим валидации конфигурации...")
+        from utils.config_validator import validate_config
+        is_valid = validate_config(config)
+        if is_valid:
+            logger.info("✅ Конфигурация валидна!")
+        else:
+            logger.error("❌ Конфигурация содержит ошибки!")
+        return
+    
+    # Интерактивный режим
+    if args.mode == 'interactive':
+        logger.info("🎮 Запуск интерактивного режима...")
+        from run_interactive import run_interactive_mode
+        run_interactive_mode(config)
+        return
     
     try:
         if args.mode in ['data', 'full']:
