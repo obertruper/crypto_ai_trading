@@ -149,7 +149,20 @@ class TradingLogger:
     
     def log_model_metrics(self, epoch: int, metrics: Dict[str, float]):
         """Логирование метрик модели"""
-        metrics_str = " | ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
+        # Специальное форматирование для разных метрик
+        formatted_metrics = []
+        for k, v in metrics.items():
+            if k == 'learning_rate':
+                # Используем научную нотацию для малых значений LR
+                formatted_metrics.append(f"{k}: {v:.2e}")
+            elif k == 'epoch_time':
+                # Время в секундах с 2 знаками
+                formatted_metrics.append(f"{k}: {v:.2f}s")
+            else:
+                # Остальные метрики с 4 знаками
+                formatted_metrics.append(f"{k}: {v:.4f}")
+        
+        metrics_str = " | ".join(formatted_metrics)
         
         self.logger.info(
             f"📊 Эпоха {epoch} | {metrics_str}",

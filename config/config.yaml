@@ -157,7 +157,7 @@ model:
   batch_size: 128  # Увеличен для лучшей стабильности
   context_window: 96  # Увеличен для лучшего контекста
   d_ff: 512  # Увеличен размер feedforward
-  d_model: 128  # Увеличена размерность модели
+  d_model: 256  # Установлено для соответствия fusion layer
   dropout: 0.2  # Уменьшен dropout
   e_layers: 3  # Оптимальное количество слоев
   early_stopping_patience: 20  # Больше терпения
@@ -183,7 +183,7 @@ model:
   mixup_alpha: 0.2
   weight_noise: 0.01
   # Параметры для улучшенной версии PatchTST
-  use_improvements: true  # Использовать улучшения из patchtst_improved
+  use_improvements: false  # Временно отключено до исправления размерностей
   feature_attention: true  # Использовать FeatureAttention
   multi_scale_patches: true  # Использовать многомасштабные патчи
 optimizer:

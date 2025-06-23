@@ -448,7 +448,7 @@ class Trainer:
             
             # Логирование метрик для отладки
             self.logger.info(f"📊 Метрики эпохи {epoch + 1}: train_loss={train_metrics['loss']:.4f}, val_loss={val_metrics['loss']:.4f}, "
-                           f"overfitting_ratio={overfitting_ratio:.3f}, improvement={improvement:.6f}")
+                           f"overfitting_ratio={overfitting_ratio:.3f}, improvement={improvement:.6f}, current_lr={current_lr:.2e}")
             
             if improvement > self.min_delta:
                 # Значительное улучшение
