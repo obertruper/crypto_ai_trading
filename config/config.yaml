@@ -207,9 +207,9 @@ performance:
   prefetch_factor: 1
 remote_server:
   direct_connection:
-    host: 109.198.107.223
+    host: ssh1.vast.ai
     key_path: ~/.ssh/id_rsa
-    port: 48937
+    port: 30421
     user: root
   enabled: true
   ports:

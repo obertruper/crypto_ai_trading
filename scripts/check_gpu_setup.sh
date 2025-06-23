@@ -11,17 +11,17 @@ echo "================================================"
 
 # 1. Проверка SSH ключа
 echo -e "\n1️⃣ Проверка SSH ключа..."
-if [ -f ~/.ssh/vast_ai_key ]; then
+if [ -f ~/.ssh/id_rsa ]; then
     echo -e "${GREEN}✅ SSH ключ найден${NC}"
 else
     echo -e "${RED}❌ SSH ключ не найден${NC}"
-    echo "   Создайте файл: ~/.ssh/vast_ai_key"
+    echo "   Создайте файл: ~/.ssh/id_rsa"
     exit 1
 fi
 
 # 2. Проверка подключения к серверу
 echo -e "\n2️⃣ Проверка подключения к серверу..."
-if ssh -o ConnectTimeout=5 -p 48937 -i ~/.ssh/vast_ai_key root@109.198.107.223 "echo 'OK'" &>/dev/null; then
+if ssh -o ConnectTimeout=5 -p 30421 -i ~/.ssh/id_rsa root@ssh1.vast.ai "echo 'OK'" &>/dev/null; then
     echo -e "${GREEN}✅ Подключение к серверу успешно${NC}"
 else
     echo -e "${RED}❌ Не удается подключиться к серверу${NC}"

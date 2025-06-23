@@ -11,9 +11,9 @@ NC='\033[0m'
 echo -e "${BLUE}🔧 Установка инструментов на Vast.ai сервере${NC}"
 
 # Параметры подключения
-HOST="109.198.107.223"
-PORT="48937"
-KEY_PATH="$HOME/.ssh/vast_ai_key"
+HOST="ssh1.vast.ai"
+PORT="30421"
+KEY_PATH="$HOME/.ssh/id_rsa"
 
 # Проверка SSH ключа
 if [ ! -f "$KEY_PATH" ]; then

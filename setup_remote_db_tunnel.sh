@@ -25,7 +25,7 @@ echo "Локальный порт 5555 -> Удаленный порт 5555"
 pkill -f "5555:localhost:5555"
 
 # Создаем новый туннель
-ssh -o StrictHostKeyChecking=no -f -N -R 5555:localhost:5555 root@ssh6.vast.ai -p 30197
+ssh -o StrictHostKeyChecking=no -f -N -R 5555:localhost:5555 root@ssh1.vast.ai -p 30421
 
 if [ $? -eq 0 ]; then
     echo "✅ Туннель создан успешно!"
@@ -33,7 +33,7 @@ if [ $? -eq 0 ]; then
     # Проверяем подключение с сервера
     echo ""
     echo "🔍 Проверка подключения с сервера..."
-    ssh -o StrictHostKeyChecking=no root@ssh6.vast.ai -p 30197 "
+    ssh -o StrictHostKeyChecking=no root@ssh1.vast.ai -p 30421 "
         python3 -c \"
 import psycopg2
 try:

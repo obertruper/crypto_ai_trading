@@ -18,13 +18,13 @@ fi
 
 # 2. Синхронизация если нужно
 echo -e "\n${YELLOW}Проверка синхронизации...${NC}"
-if ! ssh -p 48937 -i ~/.ssh/vast_ai_key root@109.198.107.223 "test -f /root/crypto_ai_trading/cache/features_cache.pkl" &>/dev/null; then
+if ! ssh -p 30421 -i ~/.ssh/id_rsa root@ssh1.vast.ai "test -f /root/crypto_ai_trading/cache/features_cache.pkl" &>/dev/null; then
     echo -e "${YELLOW}📤 Синхронизация проекта и кэша...${NC}"
     ./scripts/sync_to_vast.sh
     
     # Копируем кэш
     echo -e "${YELLOW}📦 Копирование кэша...${NC}"
-    scp -P 48937 -i ~/.ssh/vast_ai_key cache/features_cache.pkl root@109.198.107.223:/root/crypto_ai_trading/cache/
+    scp -P 30421 -i ~/.ssh/id_rsa cache/features_cache.pkl root@ssh1.vast.ai:/root/crypto_ai_trading/cache/
 fi
 
 # 3. Запуск обучения
