@@ -34,3 +34,5 @@ __all__ = [
     'TemporalEnsemble',
     'create_ensemble'
 ]
+# Унифицированная модель
+from .patchtst_unified import UnifiedPatchTSTForTrading, create_unified_model

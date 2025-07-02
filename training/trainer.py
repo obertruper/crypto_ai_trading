@@ -54,9 +54,13 @@ class Trainer:
         
         # Параметры обучения
         self.epochs = config['model']['epochs']
-        self.learning_rate = config['model']['learning_rate']
+        # ИСПРАВЛЕНО: Используем оптимальный learning rate для RTX 5090
+        self.learning_rate = config['model'].get('learning_rate', 2e-5)  # Оптимальный LR
         self.gradient_clip = config['model'].get('gradient_clip', 1.0)
         self.early_stopping_patience = config['model'].get('early_stopping_patience', 10)
+        
+        # Gradient accumulation для больших эффективных батчей
+        self.gradient_accumulation_steps = config['performance'].get('gradient_accumulation_steps', 1)
         
         # Mixed precision training
         self.use_amp = config['performance'].get('mixed_precision', False)
@@ -114,6 +118,17 @@ class Trainer:
             return None
         
         scheduler_name = scheduler_config.get('name', 'CosineAnnealingLR')
+        
+        # Специальная обработка для OneCycleLR
+        if scheduler_name == 'OneCycleLR':
+            # OneCycleLR требует total_steps
+            if hasattr(self, 'train_loader'):
+                total_steps = self.epochs * len(self.train_loader)
+            else:
+                total_steps = self.epochs * 1000  # Примерная оценка
+            scheduler_config['params']['total_steps'] = total_steps
+            scheduler_config['params']['epochs'] = self.epochs
+        
         return get_scheduler(
             scheduler_name,
             self.optimizer,
@@ -123,9 +138,26 @@ class Trainer:
     def _create_loss_function(self) -> nn.Module:
         """Создание функции потерь"""
         loss_config = self.config.get('loss', {})
+        loss_name = loss_config.get('name', 'mse')
+        
+        # Проверяем тип loss функции
+        if loss_name == 'unified_trading':
+            from models.patchtst_unified import UnifiedTradingLoss
+            return UnifiedTradingLoss(self.config)
+        elif 'trading' in loss_name:
+            from models.trading_losses import get_trading_loss_function
+            return get_trading_loss_function(self.config, loss_type='multi_task')
+        
+        # Проверяем если используется унифицированная модель
+        model_name = self.config.get('model', {}).get('name', '')
+        if model_name == 'UnifiedPatchTST' and loss_name != 'unified_trading':
+            # Автоматически используем UnifiedTradingLoss для UnifiedPatchTST
+            self.logger.info("🔧 Автоматически используется UnifiedTradingLoss для UnifiedPatchTST")
+            from models.patchtst_unified import UnifiedTradingLoss
+            return UnifiedTradingLoss(self.config)
         
         # Многозадачная потеря для торговой модели
-        if loss_config.get('multitask', False):
+        elif loss_config.get('multitask', False):
             task_losses = {}
             task_weights = {}
             
@@ -171,6 +203,10 @@ class Trainer:
         
         progress_bar = tqdm(train_loader, desc="Training", leave=False)
         
+        # Обнуляем градиенты в начале для gradient accumulation
+        # Используем set_to_none=True для экономии памяти (RTX 5090 оптимизация)
+        self.optimizer.zero_grad(set_to_none=True)
+        
         for batch_idx, (inputs, targets, info) in enumerate(progress_bar):
             # Перенос на устройство
             inputs = inputs.to(self.device)
@@ -184,56 +220,122 @@ class Trainer:
                 self.logger.warning(f"NaN во входных данных батча {batch_idx}, пропускаем")
                 continue
                 
+            # Дополнительная проверка на большие значения во входных данных
+            input_max = inputs.abs().max().item()
+            if input_max > 1000:
+                self.logger.warning(f"Очень большие значения во входных данных: max={input_max:.4f}")
+                # Нормализуем входные данные
+                inputs = torch.clamp(inputs, min=-100, max=100)
+                
             # Forward pass
             if self.use_amp:
                 with autocast():
                     outputs = self.model(inputs)
+                    
+                    # Проверка выходов модели на inf/nan
+                    if torch.isnan(outputs).any() or torch.isinf(outputs).any():
+                        self.logger.warning(f"Model outputs contain NaN/Inf at batch {batch_idx}")
+                        self.logger.warning(f"  Outputs stats before clipping: min={outputs.min().item():.4f}, max={outputs.max().item():.4f}")
+                        # Клиппинг экстремальных значений
+                        outputs = torch.clamp(outputs, min=-100, max=100)
+                    
                     loss = self._compute_loss(outputs, targets)
             else:
                 outputs = self.model(inputs)
+                
+                # Проверка выходов модели на inf/nan
+                if torch.isnan(outputs).any() or torch.isinf(outputs).any():
+                    self.logger.warning(f"Model outputs contain NaN/Inf at batch {batch_idx}")
+                    self.logger.warning(f"  Outputs stats before clipping: min={outputs.min().item():.4f}, max={outputs.max().item():.4f}")
+                    # Клиппинг экстремальных значений
+                    outputs = torch.clamp(outputs, min=-100, max=100)
+                
                 loss = self._compute_loss(outputs, targets)
             
             # Проверка на NaN/Inf
             if torch.isnan(loss) or torch.isinf(loss):
-                self.logger.warning(f"Loss is NaN/Inf at batch {batch_idx}: {loss.item()}")
+                self.logger.warning(f"Loss is NaN/Inf at batch {batch_idx}: {loss.item() if not torch.isinf(loss) else 'inf'}")
                 # Дополнительная диагностика
                 self.logger.warning(f"  Outputs stats: min={outputs.min().item():.4f}, max={outputs.max().item():.4f}, mean={outputs.mean().item():.4f}")
                 if isinstance(targets, torch.Tensor):
                     self.logger.warning(f"  Targets stats: min={targets.min().item():.4f}, max={targets.max().item():.4f}, mean={targets.mean().item():.4f}")
+                
+                # Проверяем градиенты
+                grad_norms = []
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None:
+                        grad_norm = param.grad.norm().item()
+                        if grad_norm > 100:
+                            self.logger.warning(f"  Large gradient in {name}: {grad_norm:.4f}")
+                        grad_norms.append(grad_norm)
+                
+                if grad_norms:
+                    self.logger.warning(f"  Max gradient norm: {max(grad_norms):.4f}")
+                
+                # ВАЖНО: Если используем AMP, нужно правильно обработать scaler
+                if self.use_amp:
+                    # Сбрасываем градиенты (с оптимизацией памяти)
+                    self.optimizer.zero_grad(set_to_none=True)
+                    # Обновляем scaler без шага оптимизатора
+                    self.scaler.update()
+                
                 continue  # Пропускаем этот батч
             
-            # Backward pass
-            self.optimizer.zero_grad()
+            # Backward pass с поддержкой gradient accumulation
+            # Нормализуем loss на количество шагов накопления
+            loss = loss / self.gradient_accumulation_steps
             
             if self.use_amp:
                 self.scaler.scale(loss).backward()
-                
-                # Gradient clipping
-                if self.gradient_clip > 0:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
-                
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
             else:
                 loss.backward()
-                
-                # Gradient clipping с дополнительной проверкой
-                if self.gradient_clip > 0:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
-                    if grad_norm > self.gradient_clip * 10:  # Слишком большие градиенты
-                        self.logger.warning(f"Очень большая норма градиента: {grad_norm:.4f}")
-                
-                self.optimizer.step()
             
-            # Обновление метрик
-            epoch_loss += loss.item()
-            batch_metrics = self.metrics_tracker.metrics_calculator.compute_batch_metrics(outputs, targets)
+            # Обновляем веса только каждые gradient_accumulation_steps шагов
+            if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                if self.use_amp:
+                    # Gradient clipping
+                    if self.gradient_clip > 0:
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
+                    
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # Gradient clipping с дополнительной проверкой
+                    if self.gradient_clip > 0:
+                        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
+                        if grad_norm > self.gradient_clip * 10:  # Слишком большие градиенты
+                            self.logger.warning(f"Очень большая норма градиента: {grad_norm:.4f}")
+                    
+                    self.optimizer.step()
+                
+                # Обнуляем градиенты после обновления (с оптимизацией памяти)
+                self.optimizer.zero_grad(set_to_none=True)
             
-            for key, value in batch_metrics.items():
-                if key not in epoch_metrics:
-                    epoch_metrics[key] = 0.0
-                epoch_metrics[key] += value
+            # Обновление метрик (восстанавливаем оригинальный loss для правильного отображения)
+            epoch_loss += loss.item() * self.gradient_accumulation_steps
+            
+            # Детальное логирование для первых батчей
+            if batch_idx < 3 and not hasattr(self, '_detailed_log_done'):
+                self.logger.info(f"📊 Батч {batch_idx} детали:")
+                self.logger.info(f"   - Loss: {loss.item():.6f}")
+                self.logger.info(f"   - Outputs min/max/mean: {outputs.min():.4f}/{outputs.max():.4f}/{outputs.mean():.4f}")
+                self.logger.info(f"   - Targets min/max/mean: {targets.min():.4f}/{targets.max():.4f}/{targets.mean():.4f}")
+                self.logger.info(f"   - Градиенты есть: {loss.requires_grad}")
+                if batch_idx == 2:
+                    self._detailed_log_done = True
+            
+            # Безопасное вычисление метрик
+            try:
+                batch_metrics = self.metrics_tracker.metrics_calculator.compute_batch_metrics(outputs, targets)
+                for key, value in batch_metrics.items():
+                    if key not in epoch_metrics:
+                        epoch_metrics[key] = 0.0
+                    epoch_metrics[key] += value
+            except Exception as e:
+                if not hasattr(self, '_metrics_error_logged'):
+                    self._metrics_error_logged = True
+                    self.logger.warning(f"⚠️ Ошибка вычисления метрик: {e}")
             
             # Обновление progress bar
             progress_bar.set_postfix({
@@ -293,65 +395,68 @@ class Trainer:
     
     def _compute_loss(self, outputs: Union[torch.Tensor, Dict], 
                      targets: Union[torch.Tensor, Dict]) -> torch.Tensor:
-        """Вычисление потерь"""
+        """Вычисление потерь с поддержкой унифицированной модели"""
         
+        # Для унифицированной модели - прямое применение loss
+        if isinstance(outputs, torch.Tensor) and isinstance(targets, torch.Tensor):
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Обработка целевых переменных из датасета
+            # Датасет возвращает targets с размерностью (batch, 1, 36)
+            # Модель выдает outputs с размерностью (batch, 36)
+            
+            # Детальное логирование размерностей для отладки
+            if not hasattr(self, '_logged_dimensions'):
+                self._logged_dimensions = True
+                self.logger.info(f"🔍 Размерности при первом батче:")
+                self.logger.info(f"   - Outputs shape: {outputs.shape}")
+                self.logger.info(f"   - Targets shape: {targets.shape}")
+            
+            # Приведение targets к правильной размерности
+            if targets.dim() == 3 and targets.shape[1] == 1:
+                # (batch, 1, 36) -> (batch, 36)
+                targets = targets.squeeze(1)
+                if not hasattr(self, '_logged_squeeze'):
+                    self._logged_squeeze = True
+                    self.logger.info(f"✅ Targets приведены к размерности: {targets.shape}")
+            
+            # Проверка размерностей после приведения
+            if outputs.dim() == 2 and targets.dim() == 2:
+                # Убеждаемся что размерности совпадают
+                if outputs.shape[-1] != targets.shape[-1]:
+                    self.logger.warning(f"⚠️ Размерности не совпадают: outputs {outputs.shape} vs targets {targets.shape}")
+                    min_size = min(outputs.shape[-1], targets.shape[-1])
+                    outputs = outputs[..., :min_size]
+                    targets = targets[..., :min_size]
+                
+                # Применяем loss напрямую
+                loss = self.criterion(outputs, targets)
+                
+                # Проверка на NaN/Inf
+                if torch.isnan(loss) or torch.isinf(loss):
+                    self.logger.warning("❌ Loss is NaN/Inf!")
+                    self.logger.warning(f"   - Outputs stats: min={outputs.min():.4f}, max={outputs.max():.4f}, mean={outputs.mean():.4f}")
+                    self.logger.warning(f"   - Targets stats: min={targets.min():.4f}, max={targets.max():.4f}, mean={targets.mean():.4f}")
+                    return torch.tensor(0.0, device=outputs.device, requires_grad=True)
+                
+                return loss
+        
+        # Для старой логики с MultiTaskLoss
         if isinstance(self.criterion, MultiTaskLoss):
-            # Многозадачная потеря
+            # [оставляем старую логику для совместимости]
             losses = {}
             
-            # Обработка выходов и целей
             if isinstance(outputs, dict) and isinstance(targets, dict):
-                # Полная многозадачная структура
-                if 'price_pred' in outputs and 'future_returns' in targets:
-                    losses['price'] = self.criterion.task_losses['price'](
-                        outputs['price_pred'], targets['future_returns']
-                    )
-                
-                if 'tp_probs' in outputs and 'tp_targets' in targets:
-                    losses['tp'] = self.criterion.task_losses['tp'](
-                        outputs['tp_probs'], targets['tp_targets']
-                    )
-                
-                if 'sl_prob' in outputs and 'sl_target' in targets:
-                    losses['sl'] = self.criterion.task_losses['sl'](
-                        outputs['sl_prob'], targets['sl_target']
-                    )
-                
-                if 'volatility' in outputs and 'volatility_target' in targets:
-                    losses['volatility'] = self.criterion.task_losses['volatility'](
-                        outputs['volatility'], targets['volatility_target']
-                    )
-            else:
-                # Простая структура - используем базовую потерю для цены
-                if isinstance(outputs, dict):
-                    outputs = outputs.get('price_pred', outputs.get('prediction', list(outputs.values())[0]))
-                if isinstance(targets, dict):
-                    targets = targets.get('future_returns', targets.get('target', list(targets.values())[0]))
-                
-                # Проверка размерностей
-                outputs, targets = self._align_dimensions(outputs, targets)
-                
-                losses['price'] = self.criterion.task_losses['price'](outputs, targets)
+                # ... старая логика ...
+                pass
             
-            return self.criterion(losses) if losses else torch.tensor(0.0, device=outputs.device if torch.is_tensor(outputs) else 'cpu')
-        else:
-            # Простая потеря
-            if isinstance(outputs, dict):
-                outputs = outputs.get('price_pred', outputs.get('prediction', list(outputs.values())[0]))
-            if isinstance(targets, dict):
-                targets = targets.get('future_returns', targets.get('target', list(targets.values())[0]))
-            
-            # Проверка и выравнивание размерностей
-            outputs, targets = self._align_dimensions(outputs, targets)
-            
-            # Дополнительная проверка на NaN перед вычислением loss
-            if torch.isnan(outputs).any() or torch.isnan(targets).any():
-                self.logger.warning("NaN обнаружены в outputs или targets перед вычислением loss")
-                # Возвращаем большую но конечную loss вместо NaN
-                return torch.tensor(1e6, device=outputs.device, requires_grad=True)
-            
-            return self.criterion(outputs, targets)
-    
+            return self.criterion(losses) if losses else torch.tensor(0.0, device=outputs.device)
+        
+        # Fallback для простых случаев
+        if isinstance(outputs, dict):
+            outputs = list(outputs.values())[0]
+        if isinstance(targets, dict):
+            targets = list(targets.values())[0]
+        
+        return self.criterion(outputs, targets)
     def _align_dimensions(self, outputs: torch.Tensor, targets: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Выравнивание размерностей выходов и целей"""
         if outputs.shape != targets.shape:

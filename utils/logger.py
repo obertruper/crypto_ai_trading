@@ -16,9 +16,10 @@ from pythonjsonlogger import jsonlogger
 class TradingLogger:
     """Централизованная система логирования для торговой системы"""
     
-    def __init__(self, name: str, config_path: str = "config/config.yaml"):
+    def __init__(self, name: str, config_path: str = "config/config.yaml", is_subprocess: bool = False):
         self.name = name
         self.config = self._load_config(config_path)
+        self.is_subprocess = is_subprocess  # Флаг для отключения консольного вывода в подпроцессах
         self.logger = self._setup_logger()
         self.stage_timers = {}
         
@@ -47,7 +48,8 @@ class TradingLogger:
         log_dir = Path(self.config['logging']['log_dir'])
         log_dir.mkdir(parents=True, exist_ok=True)
         
-        if 'console' in self.config['logging']['handlers']:
+        # В подпроцессах отключаем консольный вывод для предотвращения дублирования
+        if 'console' in self.config['logging']['handlers'] and not self.is_subprocess:
             console_handler = self._create_console_handler()
             logger.addHandler(console_handler)
         
@@ -55,8 +57,10 @@ class TradingLogger:
             file_handler = self._create_file_handler(log_dir)
             logger.addHandler(file_handler)
         
-        json_handler = self._create_json_handler(log_dir)
-        logger.addHandler(json_handler)
+        # JSON логирование только в основном процессе
+        if not self.is_subprocess:
+            json_handler = self._create_json_handler(log_dir)
+            logger.addHandler(json_handler)
         
         return logger
     
@@ -273,9 +277,9 @@ class TradingLogger:
         self.logger.critical(message, extra=kwargs)
 
 
-def get_logger(name: str) -> TradingLogger:
+def get_logger(name: str, is_subprocess: bool = False) -> TradingLogger:
     """Получить экземпляр логгера"""
-    return TradingLogger(name)
+    return TradingLogger(name, is_subprocess=is_subprocess)
 
 
 def setup_logging(config: Dict[str, Any] = None) -> None:

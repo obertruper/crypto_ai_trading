@@ -53,28 +53,77 @@ class CryptoTradingMenu:
         self.logger = menu_logger
         self.logger.info(f"Запуск интерактивного меню. Лог файл: {log_file}")
         
+        # Определяем режим работы (локальный или удаленный)
+        self.is_local_mode = self._detect_local_mode()
+        
         # Загружаем профили серверов
         self.profiles_path = Path("config/server_profiles.yaml")
         self.server_profiles = self.load_server_profiles()
         
-        # SSH параметры подключения из активного профиля или конфига
-        if self.server_profiles:
-            active_profile = self.server_profiles.get('active_profile')
-            if active_profile and active_profile in self.server_profiles.get('profiles', {}):
-                profile = self.server_profiles['profiles'][active_profile]
-                self.ssh_host = profile['connection']['host']
-                self.ssh_port = str(profile['connection']['port'])
-                self.ssh_user = profile['connection']['user']
-                self.ssh_key_path = profile['connection']['key_path']
-                self.current_server_profile = active_profile
-                self.logger.info(f"Используется профиль сервера: {active_profile} - {profile['name']}")
-            else:
-                self.logger.warning("Активный профиль сервера не найден, используются настройки из основного конфига")
-                self._load_config_ssh_params()
+        if self.is_local_mode:
+            self.logger.info("🏠 Работа в локальном режиме")
+            self.current_server_profile = "local"
+            # Проверяем GPU
+            self._check_local_gpu()
         else:
-            self.logger.warning("Файл профилей серверов не найден, используются настройки из основного конфига")
-            self._load_config_ssh_params()
+            # SSH параметры подключения из активного профиля или конфига
+            if self.server_profiles:
+                active_profile = self.server_profiles.get('active_profile')
+                if active_profile and active_profile in self.server_profiles.get('profiles', {}):
+                    profile = self.server_profiles['profiles'][active_profile]
+                    self.ssh_host = profile['connection']['host']
+                    self.ssh_port = str(profile['connection']['port'])
+                    self.ssh_user = profile['connection']['user']
+                    self.ssh_key_path = profile['connection']['key_path']
+                    self.current_server_profile = active_profile
+                    self.logger.info(f"Используется профиль сервера: {active_profile} - {profile['name']}")
+                else:
+                    self.logger.warning("Активный профиль сервера не найден, используются настройки из основного конфига")
+                    self._load_config_ssh_params()
+            else:
+                self.logger.warning("Файл профилей серверов не найден, используются настройки из основного конфига")
+                self._load_config_ssh_params()
             
+    def _detect_local_mode(self) -> bool:
+        """Определение локального режима работы"""
+        # Проверяем переменную окружения
+        if os.environ.get('CRYPTO_AI_LOCAL_MODE', '').lower() == 'true':
+            return True
+        
+        # Проверяем наличие GPU локально
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                if 'RTX 5090' in gpu_name or 'RTX 50' in gpu_name:
+                    return True
+        except:
+            pass
+            
+        # Проверяем отсутствие SSH конфигурации
+        remote_config = self.config.get('remote_server', {})
+        if not remote_config.get('enabled', True):
+            return True
+            
+        return False
+    
+    def _check_local_gpu(self):
+        """Проверка локального GPU"""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                self.gpu_name = torch.cuda.get_device_name(0)
+                self.gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                self.logger.info(f"🎮 Обнаружен GPU: {self.gpu_name} ({self.gpu_memory:.1f} GB)")
+            else:
+                self.gpu_name = "CPU"
+                self.gpu_memory = 0
+                self.logger.warning("⚠️  GPU не обнаружен, будет использоваться CPU")
+        except Exception as e:
+            self.gpu_name = "Не определен"
+            self.gpu_memory = 0
+            self.logger.error(f"Ошибка проверки GPU: {e}")
+    
     def _load_config_ssh_params(self):
         """Загрузка SSH параметров из основного конфига (fallback)"""
         remote_config = self.config.get('remote_server', {})
@@ -1202,32 +1251,75 @@ for _, row in df.iterrows():
             info_table.add_column("Parameter", style="cyan")
             info_table.add_column("Value", style="white")
             
-            info_table.add_row("📊 Информация о сервере:", "")
-            info_table.add_row("   • GPU:", "2x RTX 4090 (82.6 TFLOPS)")
-            info_table.add_row("   • VRAM:", "48 GB (2x24)")
-            info_table.add_row("   • RAM:", "90 GB")
-            info_table.add_row("   • Ускорение:", "10-20x по сравнению с CPU")
+            if self.is_local_mode:
+                info_table.add_row("📊 Информация о системе:", "🏠 Локальный режим")
+                if hasattr(self, 'gpu_name'):
+                    info_table.add_row("   • GPU:", f"{self.gpu_name}")
+                    if self.gpu_memory > 0:
+                        info_table.add_row("   • VRAM:", f"{self.gpu_memory:.1f} GB")
+                else:
+                    info_table.add_row("   • GPU:", "Не определен")
+                
+                # Локальная системная информация
+                try:
+                    import psutil
+                    ram_total = psutil.virtual_memory().total / 1024**3
+                    ram_available = psutil.virtual_memory().available / 1024**3
+                    info_table.add_row("   • RAM:", f"{ram_total:.1f} GB (свободно {ram_available:.1f} GB)")
+                    cpu_count = psutil.cpu_count(logical=False)
+                    info_table.add_row("   • CPU:", f"{cpu_count} ядер")
+                except:
+                    pass
+                    
+                info_table.add_row("   • Ускорение:", "Максимальная производительность")
+            else:
+                info_table.add_row("📊 Информация о сервере:", "")
+                info_table.add_row("   • GPU:", "2x RTX 4090 (82.6 TFLOPS)")
+                info_table.add_row("   • VRAM:", "48 GB (2x24)")
+                info_table.add_row("   • RAM:", "90 GB")
+                info_table.add_row("   • Ускорение:", "10-20x по сравнению с CPU")
             
             # Показываем текущий способ подключения
-            remote_config = self.config.get('remote_server', {})
-            preferred = remote_config.get('preferred_connection', 'direct')
-            conn_type = "Прямое подключение" if preferred == 'direct' else "Через прокси"
-            info_table.add_row("   • Подключение:", conn_type)
+            if self.is_local_mode:
+                info_table.add_row("   • Подключение:", "Локальная работа")
+            else:
+                remote_config = self.config.get('remote_server', {})
+                preferred = remote_config.get('preferred_connection', 'direct')
+                conn_type = "Прямое подключение" if preferred == 'direct' else "Через прокси"
+                info_table.add_row("   • Подключение:", conn_type)
             
             self.console.print(info_table)
             
-            # Проверяем состояние сервера
-            with self.console.status("[cyan]Проверка подключения к серверу...[/cyan]"):
-                server_status = self._check_server_status()
+            # Проверяем состояние системы
+            server_status = {'connected': True, 'project_exists': True}  # Дефолтные значения для локального режима
             
-            if server_status['connected']:
-                self.console.print("[green]✅ Сервер доступен[/green]")
-                if server_status['project_exists']:
-                    self.console.print("[green]✅ Проект синхронизирован[/green]")
-                else:
-                    self.console.print("[yellow]⚠️  Проект не найден на сервере[/yellow]")
+            if self.is_local_mode:
+                with self.console.status("[cyan]Проверка локальной системы...[/cyan]"):
+                    # Проверяем БД
+                    try:
+                        from data.data_loader import CryptoDataLoader
+                        loader = CryptoDataLoader(self.config)
+                        self.console.print("[green]✅ База данных доступна[/green]")
+                    except Exception as e:
+                        self.console.print(f"[red]❌ Ошибка подключения к БД: {e}[/red]")
+                    
+                    # Проверяем GPU
+                    if hasattr(self, 'gpu_name') and self.gpu_name != "CPU":
+                        self.console.print(f"[green]✅ GPU доступен: {self.gpu_name}[/green]")
+                    else:
+                        self.console.print("[yellow]⚠️  GPU не обнаружен[/yellow]")
             else:
-                self.console.print("[red]❌ Сервер недоступен[/red]")
+                with self.console.status("[cyan]Проверка подключения к серверу...[/cyan]"):
+                    server_status = self._check_server_status()
+                
+                if server_status['connected']:
+                    self.console.print("[green]✅ Сервер доступен[/green]")
+                    if server_status['project_exists']:
+                        self.console.print("[green]✅ Проект синхронизирован[/green]")
+                    else:
+                        self.console.print("[yellow]⚠️  Проект не найден на сервере[/yellow]")
+                else:
+                    self.console.print("[red]❌ Сервер недоступен[/red]")
             
             # Меню действий
             self.console.print("\n[bold cyan]Выберите действие:[/bold cyan]")
@@ -1249,14 +1341,21 @@ for _, row in df.iterrows():
             
             if choice == "1":
                 self.logger.info("GPU меню: выбрана синхронизация")
-                self.sync_to_gpu_server()
-            elif choice == "2":
-                self.logger.info("GPU меню: выбран запуск обучения")
-                if not server_status['project_exists']:
-                    self.console.print("\n[yellow]⚠️  Сначала нужно синхронизировать проект![/yellow]")
+                if self.is_local_mode:
+                    self.console.print("\n[yellow]ℹ️  В локальном режиме синхронизация не требуется[/yellow]")
                     Prompt.ask("\nНажмите Enter для продолжения")
                 else:
+                    self.sync_to_gpu_server()
+            elif choice == "2":
+                self.logger.info("GPU меню: выбран запуск обучения")
+                if self.is_local_mode:
                     self.launch_gpu_training()
+                else:
+                    if not server_status['project_exists']:
+                        self.console.print("\n[yellow]⚠️  Сначала нужно синхронизировать проект![/yellow]")
+                        Prompt.ask("\nНажмите Enter для продолжения")
+                    else:
+                        self.launch_gpu_training()
             elif choice == "3":
                 self.logger.info("GPU меню: выбран мониторинг")
                 self.monitor_with_browser()
@@ -1322,7 +1421,12 @@ for _, row in df.iterrows():
         Prompt.ask("\nНажмите Enter для продолжения")
     
     def launch_gpu_training(self):
-        """Запуск обучения на GPU сервере"""
+        """Запуск обучения на GPU"""
+        if self.is_local_mode:
+            self.console.print("\n[cyan]🚀 Запуск локального обучения[/cyan]")
+            self._launch_local_training()
+            return
+        
         self.console.print("\n[cyan]🚀 Запуск обучения на GPU сервере[/cyan]")
         
         # Проверяем наличие кэша локально
@@ -1977,6 +2081,135 @@ python3 run_full_pipeline.py --mode train 2>&1 | tee logs/training_gpu_{datetime
                     subprocess.run(["python", "run_full_pipeline.py", "--mode", "full"])
         else:
             self.console.print("\n[yellow]⚠️ Требуется настройка системы[/yellow]")
+        
+        Prompt.ask("\nНажмите Enter для продолжения")
+    
+    def _launch_local_training(self):
+        """Запуск обучения на локальной системе с GPU"""
+        self.console.print("\n[cyan]🚀 Запуск локального обучения[/cyan]")
+        
+        # Проверяем наличие GPU
+        if not hasattr(self, 'gpu_name') or self.gpu_name == "CPU":
+            self.console.print("[yellow]⚠️  GPU не обнаружен, обучение будет выполняться на CPU[/yellow]")
+            if not Confirm.ask("Продолжить без GPU?"):
+                return
+        
+        # Проверяем наличие кэша данных
+        cache_file = Path("cache/features_cache.pkl")
+        if not cache_file.exists():
+            self.console.print("[red]❌ Файл кэша данных не найден![/red]")
+            self.console.print("[yellow]Сначала создайте кэш через 'Управление данными' -> 'Создать/обновить признаки'[/yellow]")
+            Prompt.ask("\nНажмите Enter для продолжения")
+            return
+        
+        # Выбор режима обучения
+        self.console.print("\n[bold cyan]Выберите режим обучения:[/bold cyan]")
+        self.console.print("1. Демо (5 эпох) - быстрый тест")
+        self.console.print("2. Стандартное (50 эпох) - оптимальный баланс")
+        self.console.print("3. Полное (100 эпох) - максимальное качество")
+        self.console.print("4. Пользовательское количество эпох")
+        
+        choice = Prompt.ask("Выбор", default="1")
+        
+        if choice == "1":
+            epochs = 5
+        elif choice == "2":
+            epochs = 50
+        elif choice == "3":
+            epochs = 100
+        elif choice == "4":
+            epochs = IntPrompt.ask("Количество эпох", default=10)
+        else:
+            return
+        
+        # Обновляем конфигурацию с количеством эпох
+        self.config['model']['epochs'] = epochs
+        self.save_config()
+        
+        # Информация о ресурсах
+        self.console.print(f"\n[cyan]Конфигурация обучения:[/cyan]")
+        self.console.print(f"  • Эпохи: {epochs}")
+        if hasattr(self, 'gpu_name'):
+            self.console.print(f"  • GPU: {self.gpu_name}")
+            if self.gpu_memory > 0:
+                self.console.print(f"  • VRAM: {self.gpu_memory:.1f} GB")
+        self.console.print(f"  • Batch size: {self.config['model']['batch_size']}")
+        self.console.print(f"  • Learning rate: {self.config['model']['learning_rate']}")
+        
+        # Запуск обучения
+        if Confirm.ask("\nЗапустить обучение?"):
+            self.console.print("\n[yellow]Запуск обучения...[/yellow]")
+            
+            # Создаем директорию для логов если не существует
+            log_dir = Path("logs")
+            log_dir.mkdir(exist_ok=True)
+            
+            # Имя лог файла
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            log_file = log_dir / f"training_local_{timestamp}.log"
+            
+            try:
+                # Запускаем обучение с выводом в реальном времени
+                self.console.print(f"[dim]Лог сохраняется в: {log_file}[/dim]\n")
+                
+                # Используем Popen для вывода в реальном времени
+                with open(log_file, 'w') as f:
+                    process = subprocess.Popen(
+                        ["python", "main.py", "--mode", "train"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,  # Построчная буферизация
+                        env={**os.environ, 'PYTHONUNBUFFERED': '1'}  # Отключаем буферизацию Python
+                    )
+                    
+                    # Читаем и выводим построчно
+                    for line in process.stdout:
+                        # Записываем в файл
+                        f.write(line)
+                        f.flush()
+                        # Выводим на консоль с форматированием
+                        line = line.rstrip()
+                        if "Epoch" in line and "/" in line:
+                            self.console.print(f"[cyan]{line}[/cyan]")
+                        elif "Loss:" in line:
+                            self.console.print(f"[yellow]{line}[/yellow]")
+                        elif "✅" in line or "Сохранен" in line:
+                            self.console.print(f"[green]{line}[/green]")
+                        elif "❌" in line or "Ошибка" in line:
+                            self.console.print(f"[red]{line}[/red]")
+                        elif "GPU" in line or "CUDA" in line:
+                            self.console.print(f"[magenta]{line}[/magenta]")
+                        else:
+                            self.console.print(line)
+                    
+                    # Ждем завершения процесса
+                    return_code = process.wait()
+                    
+                if return_code == 0:
+                    self.console.print("\n[green]✅ Обучение успешно завершено![/green]")
+                    
+                    # Проверяем сохраненные модели
+                    models_dir = Path("models_saved")
+                    if models_dir.exists():
+                        latest_models = sorted(models_dir.glob("*.pth"), 
+                                             key=lambda x: x.stat().st_mtime, 
+                                             reverse=True)[:3]
+                        if latest_models:
+                            self.console.print("\n[cyan]Сохраненные модели:[/cyan]")
+                            for model in latest_models:
+                                size_mb = model.stat().st_size / (1024 * 1024)
+                                self.console.print(f"  • {model.name} ({size_mb:.1f} MB)")
+                else:
+                    self.console.print(f"\n[red]❌ Обучение завершилось с ошибкой (код: {return_code})[/red]")
+                    
+            except KeyboardInterrupt:
+                self.console.print("\n[yellow]⚠️  Обучение прервано пользователем[/yellow]")
+                if process:
+                    process.terminate()
+            except Exception as e:
+                self.console.print(f"\n[red]❌ Ошибка при запуске обучения: {e}[/red]")
+                self.logger.error(f"Ошибка в _launch_local_training: {e}", exc_info=True)
         
         Prompt.ask("\nНажмите Enter для продолжения")
     

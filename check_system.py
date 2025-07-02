@@ -42,11 +42,11 @@ def check_files():
     """Проверка основных файлов"""
     required_files = [
         'main.py',
-        'train_model.py',
         'run_interactive.py',
         'config/config.yaml',
         'models/patchtst.py',
-        'data/feature_engineering.py'
+        'data/feature_engineering.py',
+        'data/data_loader.py'
     ]
     
     missing = []
@@ -97,7 +97,9 @@ def main():
     if all_passed:
         console.print("\n[bold green]✅ СИСТЕМА ГОТОВА К РАБОТЕ![/bold green]")
         console.print("\n[yellow]Запустите обучение:[/yellow]")
-        console.print("[bold]python train_model.py[/bold]")
+        console.print("[bold]python main.py --mode train[/bold]")
+        console.print("\n[yellow]Или используйте интерактивное меню:[/yellow]")
+        console.print("[bold]python run_interactive.py[/bold]")
     else:
         console.print("\n[bold red]❌ ОБНАРУЖЕНЫ ПРОБЛЕМЫ[/bold red]")
         console.print("\n[yellow]Исправьте проблемы и запустите проверку снова[/yellow]")

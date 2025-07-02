@@ -27,6 +27,37 @@ class CryptoDataLoader:
         self.cache_dir = Path(config.get('performance', {}).get('cache_dir', 'cache'))
         self.cache_dir.mkdir(exist_ok=True)
         self.engine = self._create_engine()
+    
+    def get_data_stats(self) -> Dict:
+        """Получение статистики по данным в БД"""
+        with self.engine.connect() as conn:
+            # Общее количество записей
+            total_records = conn.execute(
+                text("SELECT COUNT(*) FROM raw_market_data")
+            ).scalar()
+            
+            # Количество уникальных символов
+            unique_symbols = conn.execute(
+                text("SELECT COUNT(DISTINCT symbol) FROM raw_market_data")
+            ).scalar()
+            
+            # Диапазон дат (timestamp хранится как Unix timestamp в миллисекундах)
+            date_range = conn.execute(
+                text("""
+                    SELECT to_timestamp(MIN(timestamp)/1000)::date as min_date, 
+                           to_timestamp(MAX(timestamp)/1000)::date as max_date 
+                    FROM raw_market_data
+                """)
+            ).fetchone()
+            
+            return {
+                'total_records': total_records or 0,
+                'unique_symbols': unique_symbols or 0,
+                'date_range': {
+                    'min': str(date_range.min_date) if date_range else 'N/A',
+                    'max': str(date_range.max_date) if date_range else 'N/A'
+                }
+            }
         
     def _create_engine(self):
         """Создание SQLAlchemy engine с поддержкой переменных окружения"""

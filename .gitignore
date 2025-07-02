@@ -100,6 +100,7 @@ celerybeat.pid
 .venv
 env/
 venv/
+venv_crypto/
 ENV/
 env.bak/
 venv.bak/
@@ -137,6 +138,7 @@ experiments/
 data/*.csv
 data/*.parquet
 data/*.json
+data/processed/
 
 # IDE
 .idea/
@@ -192,3 +194,6 @@ lsp_server/*.pid
 lsp_server/__pycache__/
 lsp_server/.mypy_cache/
 lsp_server/lsp_profile.json
+
+# Metabase data
+metabase-data/

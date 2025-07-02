@@ -156,15 +156,43 @@ class MetricsCalculator:
             # Reshape to 2D для вычисления метрик
             batch_size, time_steps, n_features = predictions.shape
             predictions = predictions.reshape(-1, n_features)
-            targets = targets.reshape(-1, n_features)
             
-            # Проверка на NaN
-            if np.isnan(predictions).any() or np.isnan(targets).any():
-                # Заменяем NaN на 0 для вычисления метрик
-                predictions = np.nan_to_num(predictions, nan=0.0)
-                targets = np.nan_to_num(targets, nan=0.0)
+            # ИСПРАВЛЕНИЕ: Проверяем размерности targets
+            if targets.ndim == 3:
+                targets = targets.reshape(-1, n_features)
+            elif targets.ndim == 2:
+                # Если targets 2D, то возможно нужно расширить или обрезать
+                if targets.shape[0] != predictions.shape[0]:
+                    # Приводим к одинаковому размеру
+                    min_samples = min(predictions.shape[0], targets.shape[0])
+                    predictions = predictions[:min_samples]
+                    targets = targets[:min_samples]
             
-            # Вычисляем метрики для каждого признака
+        # ИСПРАВЛЕНИЕ: Дополнительная проверка размерностей
+        if predictions.shape != targets.shape:
+            # Приводим к минимальному общему размеру
+            min_samples = min(predictions.shape[0], targets.shape[0])
+            min_features = min(predictions.shape[1] if predictions.ndim > 1 else 1, 
+                              targets.shape[1] if targets.ndim > 1 else 1)
+            
+            predictions = predictions[:min_samples]
+            targets = targets[:min_samples]
+            
+            if predictions.ndim > 1 and targets.ndim > 1:
+                predictions = predictions[:, :min_features]
+                targets = targets[:, :min_features]
+        
+        # Проверка на NaN
+        if np.isnan(predictions).any() or np.isnan(targets).any():
+            # Заменяем NaN на 0 для вычисления метрик
+            predictions = np.nan_to_num(predictions, nan=0.0)
+            targets = np.nan_to_num(targets, nan=0.0)
+        
+        # Получаем актуальное количество признаков после всех обработок
+        n_features = predictions.shape[1] if predictions.ndim > 1 else 1
+        
+        # Вычисляем метрики для каждого признака
+        if predictions.ndim > 1 and n_features > 1:
             for i in range(n_features):
                 pred_i = predictions[:, i]
                 target_i = targets[:, i]

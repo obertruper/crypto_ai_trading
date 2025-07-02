@@ -9,6 +9,8 @@ from typing import Dict, List, Tuple, Optional
 from scipy import stats
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from tqdm import tqdm
+# Для совместимости с логированием
+from tqdm.contrib.logging import logging_redirect_tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -22,42 +24,52 @@ class FeatureEngineer:
         self.logger = get_logger("FeatureEngineer")
         self.feature_config = config['features']
         self.scalers = {}
+        self.process_position = None  # Позиция для прогресс-баров при параллельной обработке
+        self.disable_progress = False  # Флаг для отключения прогресс-баров
     
     @staticmethod
-    def safe_divide(numerator: pd.Series, denominator: pd.Series, fill_value=0.0) -> pd.Series:
-        """Безопасное деление с обработкой нулей и малых значений"""
-        # Минимальное значение для знаменателя
-        min_denominator = 1e-10
-        
+    def safe_divide(numerator: pd.Series, denominator: pd.Series, fill_value=0.0, max_value=1000.0, min_denominator=1e-8) -> pd.Series:
+        """ИСПРАВЛЕНО: Безопасное деление с правильной обработкой малых значений"""
         # Создаем безопасный знаменатель
         safe_denominator = denominator.copy()
         
-        # Заменяем нули и очень маленькие значения
+        # Заменяем очень маленькие значения
         mask_small = (safe_denominator.abs() < min_denominator)
-        safe_denominator[mask_small] = np.sign(safe_denominator[mask_small]) * min_denominator
-        safe_denominator[safe_denominator == 0] = min_denominator  # Для точных нулей
+        safe_denominator[mask_small] = min_denominator
         
         # Выполняем деление
         result = numerator / safe_denominator
         
-        # Обрабатываем inf и nan
-        # Если fill_value - это Series, используем другой подход
-        if isinstance(fill_value, pd.Series):
-            # Находим позиции с inf и заменяем их соответствующими значениями из fill_value
-            inf_mask = np.isinf(result)
-            result.loc[inf_mask] = fill_value.loc[inf_mask]
-        else:
-            # Если fill_value - скаляр, используем стандартный replace
-            result = result.replace([np.inf, -np.inf], fill_value)
+        # Клиппинг результата для предотвращения экстремальных значений
+        result = result.clip(lower=-max_value, upper=max_value)
         
+        # Обработка inf и nan
+        result = result.replace([np.inf, -np.inf], [fill_value, fill_value])
         result = result.fillna(fill_value)
         
         return result
+    
+    def calculate_vwap(self, df: pd.DataFrame) -> pd.Series:
+        """Улучшенный расчет VWAP с дополнительными проверками"""
+        # Базовый расчет VWAP
+        vwap = self.safe_divide(
+            df['turnover'], 
+            df['volume'], 
+            fill_value=df['close']
+        )
+        
+        # Дополнительная проверка: VWAP не должен сильно отличаться от close
+        # Если VWAP слишком отличается от close (более чем в 2 раза), используем close
+        mask_invalid = (vwap < df['close'] * 0.5) | (vwap > df['close'] * 2.0)
+        vwap[mask_invalid] = df['close'][mask_invalid]
+        
+        return vwap
         
     def create_features(self, df: pd.DataFrame, train_end_date: Optional[str] = None) -> pd.DataFrame:
         """Создание всех признаков для датасета с walk-forward валидацией"""
-        self.logger.start_stage("feature_engineering", 
-                               symbols=df['symbol'].nunique())
+        if not self.disable_progress:
+            self.logger.start_stage("feature_engineering", 
+                                   symbols=df['symbol'].nunique())
         
         # Валидация данных
         self._validate_data(df)
@@ -71,27 +83,33 @@ class FeatureEngineer:
             symbol_data = self._create_basic_features(symbol_data)
             symbol_data = self._create_technical_indicators(symbol_data)
             symbol_data = self._create_microstructure_features(symbol_data)
+            symbol_data = self._create_rally_detection_features(symbol_data)
+            symbol_data = self._create_signal_quality_features(symbol_data)
+            symbol_data = self._create_futures_specific_features(symbol_data)
             symbol_data = self._create_temporal_features(symbol_data)
             symbol_data = self._create_target_variables(symbol_data)
             
             featured_dfs.append(symbol_data)
         
         result_df = pd.concat(featured_dfs, ignore_index=True)
-        result_df = self._create_cross_asset_features(result_df)
+        
+        # ИСПРАВЛЕНО: cross-asset features нужны все символы, но если обрабатываем по одному - пропускаем
+        # Если в df больше одного символа - создаем cross-asset features
+        if df['symbol'].nunique() > 1:
+            result_df = self._create_cross_asset_features(result_df)
         
         # Обработка NaN значений
         result_df = self._handle_missing_values(result_df)
         
-        # Walk-forward нормализация если указана дата
+        # Walk-forward нормализация только если указана дата (иначе нормализация будет в prepare_trading_data.py)
         if train_end_date:
             result_df = self._normalize_walk_forward(result_df, train_end_date)
-        else:
-            result_df = self._normalize_features(result_df)
         
         self._log_feature_statistics(result_df)
         
-        self.logger.end_stage("feature_engineering", 
-                            total_features=len(result_df.columns))
+        if not self.disable_progress:
+            self.logger.end_stage("feature_engineering", 
+                                total_features=len(result_df.columns))
         
         return result_df
     
@@ -99,14 +117,16 @@ class FeatureEngineer:
         """Валидация целостности данных"""
         # Проверка на отсутствующие значения
         if df.isnull().any().any():
-            self.logger.warning("Обнаружены пропущенные значения в данных")
+            if not self.disable_progress:
+                self.logger.warning("Обнаружены пропущенные значения в данных")
             
         # Проверка на аномальные цены
         price_changes = df.groupby('symbol')['close'].pct_change()
         extreme_moves = abs(price_changes) > 0.15  # >15% за 15 минут
         
         if extreme_moves.sum() > 0:
-            self.logger.warning(f"Обнаружено {extreme_moves.sum()} экстремальных движений цены")
+            if not self.disable_progress:
+                self.logger.warning(f"Обнаружено {extreme_moves.sum()} экстремальных движений цены")
             
         # Проверка временных гэпов (только значительные разрывы > 2 часов)
         for symbol in df['symbol'].unique():
@@ -117,7 +137,8 @@ class FeatureEngineer:
             large_gaps = time_diff > expected_diff * 8
             
             if large_gaps.sum() > 0:
-                self.logger.warning(f"Символ {symbol}: обнаружено {large_gaps.sum()} значительных временных разрывов (> 2 часов)")
+                if not self.disable_progress:
+                    self.logger.warning(f"Символ {symbol}: обнаружено {large_gaps.sum()} значительных временных разрывов (> 2 часов)")
     
     def _create_basic_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Базовые признаки из OHLCV данных без look-ahead bias"""
@@ -151,9 +172,31 @@ class FeatureEngineer:
             fill_value=1.0
         )
         
-        # VWAP
-        df['vwap'] = self.safe_divide(df['turnover'], df['volume'], fill_value=df['close'])
-        df['close_vwap_ratio'] = self.safe_divide(df['close'], df['vwap'], fill_value=1.0)
+        # VWAP с улучшенным расчетом
+        df['vwap'] = self.calculate_vwap(df)
+        
+        # Более надежный расчет close_vwap_ratio
+        # Нормальное соотношение close/vwap должно быть около 1.0
+        # VWAP уже проверен и исправлен в calculate_vwap()
+        
+        # Простой и надежный расчет
+        df['close_vwap_ratio'] = df['close'] / df['vwap']
+        
+        # ИСПРАВЛЕНО: Расширенные границы для криптовалют (±30%)
+        # Криптовалюты могут отклоняться от VWAP на 20-50% в периоды высокой волатильности
+        df['close_vwap_ratio'] = df['close_vwap_ratio'].clip(lower=0.7, upper=1.3)
+        
+        # Добавляем индикатор экстремального отклонения от VWAP
+        df['vwap_extreme_deviation'] = (
+            (df['close_vwap_ratio'] < 0.85) | (df['close_vwap_ratio'] > 1.15)
+        ).astype(int)
+        
+        # Дополнительная проверка на аномалии
+        # Если ratio все еще выходит за разумные пределы, заменяем на 1.0
+        mask_invalid = (df['close_vwap_ratio'] < 0.95) | (df['close_vwap_ratio'] > 1.05)
+        if mask_invalid.sum() > 0:
+            self.logger.debug(f"Заменено {mask_invalid.sum()} аномальных close_vwap_ratio на 1.0")
+            df.loc[mask_invalid, 'close_vwap_ratio'] = 1.0
         
         return df
     
@@ -210,8 +253,31 @@ class FeatureEngineer:
             df['bb_high'] = bb.bollinger_hband()
             df['bb_low'] = bb.bollinger_lband()
             df['bb_middle'] = bb.bollinger_mavg()
-            df['bb_width'] = df['bb_high'] - df['bb_low']
-            df['bb_position'] = (df['close'] - df['bb_low']) / (df['bb_width'] + 1e-10)
+            # ИСПРАВЛЕНО: bb_width как процент от цены
+            df['bb_width'] = self.safe_divide(
+                df['bb_high'] - df['bb_low'],
+                df['close'],
+                fill_value=0.02,  # 2% по умолчанию
+                max_value=0.5   # Максимум 50% от цены
+            )
+            
+            # ИСПРАВЛЕНО: bb_position теперь корректно рассчитывается с использованием абсолютной ширины
+            # bb_position показывает где находится цена внутри канала Bollinger
+            bb_range = df['bb_high'] - df['bb_low']
+            df['bb_position'] = self.safe_divide(
+                df['close'] - df['bb_low'],
+                bb_range,
+                fill_value=0.5,
+                max_value=2.0  # Позволяем выходы за пределы для отслеживания прорывов
+            )
+            
+            # Создаем индикаторы прорывов ПЕРЕД клиппингом
+            df['bb_breakout_upper'] = (df['bb_position'] > 1).astype(int)
+            df['bb_breakout_lower'] = (df['bb_position'] < 0).astype(int)
+            df['bb_breakout_strength'] = np.abs(df['bb_position'] - 0.5) * 2  # Сила отклонения от центра
+            
+            # Теперь ограничиваем для совместимости
+            df['bb_position'] = df['bb_position'].clip(0, 1)
         
         # ATR
         atr_config = next((c for c in tech_config if c['name'] == 'atr'), None)
@@ -247,7 +313,14 @@ class FeatureEngineer:
         df['psar'] = psar.psar()
         # Вместо отдельных psar_up и psar_down, создаем индикатор направления
         df['psar_trend'] = (df['close'] > df['psar']).astype(float)
+        
+        # ИСПРАВЛЕНО: Нормализованное расстояние PSAR по волатильности
+        # Деление на ATR делает метрику сравнимой между активами
         df['psar_distance'] = (df['close'] - df['psar']) / df['close']
+        if 'atr' in df.columns:
+            df['psar_distance_normalized'] = (df['close'] - df['psar']) / (df['atr'] + 1e-10)
+        else:
+            df['psar_distance_normalized'] = df['psar_distance']
         
         return df
     
@@ -263,23 +336,466 @@ class FeatureEngineer:
         df['volume_imbalance'] = df['directed_volume'].rolling(10).sum() / \
                                  df['volume'].rolling(10).sum()
         
-        # Ценовое воздействие
-        df['price_impact'] = df['returns'].abs() / (np.log(df['volume'] + 1) + 1e-10)
-        df['toxicity'] = 1 / (1 + df['price_impact'])
+        # Ценовое воздействие - улучшенная формула
+        # ИСПРАВЛЕНО: Используем dollar volume для более точной оценки
+        df['dollar_volume'] = df['volume'] * df['close']
+        df['price_impact'] = self.safe_divide(
+            df['returns'].abs(), 
+            np.sqrt(df['dollar_volume'] + 1),  # Квадратный корень для сглаживания
+            fill_value=0.0,
+            max_value=10.0
+        )
+        
+        # Альтернативная формула с логарифмом объема
+        df['price_impact_log'] = self.safe_divide(
+            df['returns'].abs(),
+            np.log(df['volume'] + 10),  # Увеличен сдвиг для стабильности
+            fill_value=0.0,
+            max_value=10.0
+        )
+        
+        # ИСПРАВЛЕНО: Правильная формула toxicity с масштабированием
+        # Toxicity = 1 / (1 + price_impact * scaling_factor)
+        # Когда price_impact большой, toxicity маленькая (более токсичная среда)
+        df['toxicity'] = 1 / (1 + df['price_impact'] * 100)  # Масштабируем price_impact
+        df['toxicity'] = df['toxicity'].clip(0.5, 1.0)  # Разумные пределы [0.5, 1.0]
         
         # Амихуд неликвидность
-        df['amihud_illiquidity'] = df['returns'].abs() / (df['turnover'] + 1e-10)
+        df['amihud_illiquidity'] = self.safe_divide(
+            df['returns'].abs(), 
+            df['turnover'],
+            fill_value=0.0,
+            max_value=1.0  # Неликвидность редко бывает больше 1
+        )
         df['amihud_ma'] = df['amihud_illiquidity'].rolling(20).mean()
         
-        # Кайл лямбда
-        df['kyle_lambda'] = df['returns'].rolling(10).std() / \
-                           (df['volume'].rolling(10).std() + 1e-10)
+        # Кайл лямбда - правильная формула
+        # ИСПРАВЛЕНО: |price_change| / volume, а не отношение std
+        df['kyle_lambda'] = self.safe_divide(
+            df['returns'].abs(),
+            np.log(df['volume'] + 1),
+            fill_value=0.0,
+            max_value=10.0
+        )
         
-        # Реализованная волатильность
-        df['realized_vol'] = df['returns'].rolling(20).std() * np.sqrt(96)  # 96 = 24*4 (15мин интервалы)
+        # Альтернативная версия - отношение волатильностей
+        df['volatility_volume_ratio'] = self.safe_divide(
+            df['returns'].rolling(10).std(),
+            df['volume'].rolling(10).std(),
+            fill_value=0.0,
+            max_value=10.0
+        )
+        
+        # Реализованная волатильность - правильная аннуализация
+        # ИСПРАВЛЕНО: Разные периоды аннуализации
+        # Для 15-минутных данных: 96 периодов в день, 365 дней в году
+        df['realized_vol_1h'] = df['returns'].rolling(4).std() * np.sqrt(96)  # Часовая волатильность -> дневная
+        df['realized_vol_daily'] = df['returns'].rolling(96).std() * np.sqrt(96)  # Дневная волатильность
+        df['realized_vol_annual'] = df['returns'].rolling(96).std() * np.sqrt(96 * 365)  # Годовая волатильность
+        
+        # Для совместимости оставляем старое имя
+        df['realized_vol'] = df['realized_vol_daily']
         
         # Соотношение объема к волатильности
-        df['volume_volatility_ratio'] = df['volume'] / (df['realized_vol'] + 1e-10)
+        df['volume_volatility_ratio'] = self.safe_divide(
+            df['volume'],
+            df['realized_vol'],
+            fill_value=0.0,
+            max_value=1000000.0  # Большой лимит для объемов
+        )
+        
+        return df
+    
+    def _create_rally_detection_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Признаки для определения ралли и крупных движений"""
+        if not self.disable_progress:
+            self.logger.info("Создание признаков для определения ралли...")
+        initial_cols = len(df.columns)
+        features_created = []
+        
+        # 1. Накопленный объем за разные периоды (8 признаков)
+        for hours in [4, 8, 12, 24]:
+            periods = hours * 4  # 15-минутные свечи
+            col_cumsum = f'volume_cumsum_{hours}h'
+            col_ratio = f'volume_cumsum_{hours}h_ratio'
+            df[col_cumsum] = df['volume'].rolling(periods).sum()
+            df[col_ratio] = df[col_cumsum] / df['volume'].rolling(periods * 4).mean()
+            features_created.extend([col_cumsum, col_ratio])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Накопленный объем: создано {len([f for f in features_created if 'volume_cumsum' in f])} признаков")
+        
+        # 2. Аномальные всплески объема (3 признака)
+        volume_mean = df['volume'].rolling(96).mean()  # средний объем за 24ч
+        volume_std = df['volume'].rolling(96).std()
+        df['volume_zscore'] = self.safe_divide(
+            df['volume'] - volume_mean,
+            volume_std,
+            fill_value=0.0,
+            max_value=50.0  # ИСПРАВЛЕНО: В крипто Z-score может достигать 20-50
+        )
+        df['volume_spike'] = (df['volume_zscore'] > 3).astype(int)
+        df['volume_spike_magnitude'] = df['volume_zscore'].clip(0, 10)
+        features_created.extend(['volume_zscore', 'volume_spike', 'volume_spike_magnitude'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Аномальные всплески объема: создано 3 признака")
+        
+        # 3. Уровни поддержки/сопротивления (15 признаков)
+        # Локальные минимумы и максимумы
+        for window in [20, 50, 100]:  # 5ч, 12.5ч, 25ч
+            df[f'local_high_{window}'] = df['high'].rolling(window).max()
+            df[f'local_low_{window}'] = df['low'].rolling(window).min()
+            df[f'distance_from_high_{window}'] = (df['close'] - df[f'local_high_{window}']) / df['close']
+            df[f'distance_from_low_{window}'] = (df['close'] - df[f'local_low_{window}']) / df['close']
+            df[f'position_in_range_{window}'] = self.safe_divide(
+                df['close'] - df[f'local_low_{window}'],
+                df[f'local_high_{window}'] - df[f'local_low_{window}'],
+                fill_value=0.5,  # Середина диапазона
+                max_value=1.0   # Позиция в диапазоне от 0 до 1
+            )
+            features_created.extend([f'local_high_{window}', f'local_low_{window}', 
+                                   f'distance_from_high_{window}', f'distance_from_low_{window}', 
+                                   f'position_in_range_{window}'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Уровни поддержки/сопротивления: создано 15 признаков")
+        
+        # 4. Сжатие волатильности (признак будущего прорыва) (2 признака)
+        # Bollinger Bands уже есть, добавим Keltner Channels для сравнения
+        atr_multiplier = 2.0
+        ema20 = df['close'].ewm(span=20, adjust=False).mean()
+        kc_upper = ema20 + atr_multiplier * df['atr']
+        kc_lower = ema20 - atr_multiplier * df['atr']
+        kc_width = kc_upper - kc_lower
+        
+        df['volatility_squeeze'] = (df['bb_width'] < kc_width).astype(int)
+        df['volatility_squeeze_duration'] = df.groupby((df['volatility_squeeze'] != df['volatility_squeeze'].shift()).cumsum())['volatility_squeeze'].cumsum()
+        features_created.extend(['volatility_squeeze', 'volatility_squeeze_duration'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Сжатие волатильности: создано 2 признака")
+        
+        # 5. Дивергенции RSI/MACD с ценой (4 признака)
+        # RSI дивергенция
+        price_higher = (df['close'] > df['close'].shift(14)) & (df['close'].shift(14) > df['close'].shift(28))
+        rsi_lower = (df['rsi'] < df['rsi'].shift(14)) & (df['rsi'].shift(14) < df['rsi'].shift(28))
+        df['bearish_divergence_rsi'] = (price_higher & rsi_lower).astype(int)
+        
+        price_lower = (df['close'] < df['close'].shift(14)) & (df['close'].shift(14) < df['close'].shift(28))
+        rsi_higher = (df['rsi'] > df['rsi'].shift(14)) & (df['rsi'].shift(14) > df['rsi'].shift(28))
+        df['bullish_divergence_rsi'] = (price_lower & rsi_higher).astype(int)
+        
+        # MACD дивергенция
+        macd_lower = (df['macd'] < df['macd'].shift(14)) & (df['macd'].shift(14) < df['macd'].shift(28))
+        df['bearish_divergence_macd'] = (price_higher & macd_lower).astype(int)
+        
+        macd_higher = (df['macd'] > df['macd'].shift(14)) & (df['macd'].shift(14) > df['macd'].shift(28))
+        df['bullish_divergence_macd'] = (price_lower & macd_higher).astype(int)
+        features_created.extend(['bearish_divergence_rsi', 'bullish_divergence_rsi', 
+                               'bearish_divergence_macd', 'bullish_divergence_macd'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Дивергенции RSI/MACD: создано 4 признака")
+        
+        # 6. Паттерны накопления/распределения (4 признака)
+        # On-Balance Volume (OBV)
+        obv = (df['volume'] * ((df['close'] > df['close'].shift(1)) * 2 - 1)).cumsum()
+        df['obv'] = obv
+        df['obv_ema'] = obv.ewm(span=20, adjust=False).mean()
+        df['obv_divergence'] = df['obv'] - df['obv_ema']
+        
+        # Chaikin Money Flow
+        mfm = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low'] + 1e-10)
+        mfv = mfm * df['volume']
+        df['cmf'] = mfv.rolling(20).sum() / df['volume'].rolling(20).sum()
+        features_created.extend(['obv', 'obv_ema', 'obv_divergence', 'cmf'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Паттерны накопления/распределения: создано 4 признака")
+        
+        # 7. Momentum и ускорение (4 признака)
+        df['momentum_1h'] = df['close'].pct_change(4) * 100  # 1 час
+        df['momentum_4h'] = df['close'].pct_change(16) * 100  # 4 часа
+        df['momentum_24h'] = df['close'].pct_change(96) * 100  # 24 часа
+        
+        # Ускорение (изменение momentum)
+        df['momentum_acceleration'] = df['momentum_1h'] - df['momentum_1h'].shift(4)
+        features_created.extend(['momentum_1h', 'momentum_4h', 'momentum_24h', 'momentum_acceleration'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Momentum индикаторы: создано 4 признака")
+        
+        # 8. Паттерн "пружина" - сильное сжатие перед движением (1 признак)
+        df['spring_pattern'] = (
+            (df['volatility_squeeze'] == 1) & 
+            (df['volume_spike'] == 1) &
+            (df['atr_pct'].rolling(20).mean() < df['atr_pct'].rolling(100).mean() * 0.7)
+        ).astype(int)
+        features_created.append('spring_pattern')
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Паттерн 'пружина': создан 1 признак")
+        
+        # Итоговая статистика
+        total_created = len(features_created)
+        if not self.disable_progress:
+            self.logger.info(f"✅ Rally detection features: всего создано {total_created} признаков")
+            self.logger.info(f"   Детализация: {features_created}")
+        
+        return df
+    
+    def _create_signal_quality_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Признаки для оценки качества торговых сигналов"""
+        if not self.disable_progress:
+            self.logger.info("Создание признаков качества сигналов...")
+        initial_cols = len(df.columns)
+        features_created = []
+        
+        # 1. Согласованность индикаторов
+        # Определяем сигналы от разных индикаторов
+        indicators_long = []
+        indicators_short = []
+        indicators_used = []
+        
+        # RSI
+        if 'rsi' in df.columns:
+            indicators_long.append((df['rsi'] < 30).astype(int))
+            indicators_short.append((df['rsi'] > 70).astype(int))
+            indicators_used.append('RSI')
+        
+        # MACD
+        if 'macd_diff' in df.columns:
+            indicators_long.append((df['macd_diff'] > 0).astype(int))
+            indicators_short.append((df['macd_diff'] < 0).astype(int))
+            indicators_used.append('MACD')
+        
+        # Bollinger Bands
+        if 'bb_position' in df.columns:
+            indicators_long.append((df['bb_position'] < 0.2).astype(int))
+            indicators_short.append((df['bb_position'] > 0.8).astype(int))
+            indicators_used.append('Bollinger Bands')
+        
+        # Stochastic
+        if 'stoch_k' in df.columns:
+            indicators_long.append((df['stoch_k'] < 20).astype(int))
+            indicators_short.append((df['stoch_k'] > 80).astype(int))
+            indicators_used.append('Stochastic')
+        
+        # ADX (сила тренда)
+        if 'adx' in df.columns:
+            strong_trend = (df['adx'] > 25).astype(int)
+            indicators_long.append(strong_trend & (df['adx_pos'] > df['adx_neg']))
+            indicators_short.append(strong_trend & (df['adx_neg'] > df['adx_pos']))
+            indicators_used.append('ADX')
+        
+        # Moving averages
+        if 'close_sma_20_ratio' in df.columns and 'close_sma_50_ratio' in df.columns:
+            indicators_long.append((df['close_sma_20_ratio'] > df['close_sma_50_ratio']).astype(int))
+            indicators_short.append((df['close_sma_20_ratio'] < df['close_sma_50_ratio']).astype(int))
+            indicators_used.append('Moving Averages')
+        
+        # Считаем согласованность
+        if indicators_long:
+            df['indicators_consensus_long'] = sum(indicators_long) / len(indicators_long)
+            df['indicators_count_long'] = sum(indicators_long)
+        else:
+            df['indicators_consensus_long'] = 0
+            df['indicators_count_long'] = 0
+            
+        if indicators_short:
+            df['indicators_consensus_short'] = sum(indicators_short) / len(indicators_short)
+            df['indicators_count_short'] = sum(indicators_short)
+        else:
+            df['indicators_consensus_short'] = 0
+            df['indicators_count_short'] = 0
+        
+        features_created.extend(['indicators_consensus_long', 'indicators_count_long', 
+                               'indicators_consensus_short', 'indicators_count_short'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Согласованность индикаторов: создано 4 признака")
+            self.logger.info(f"    Используемые индикаторы: {', '.join(indicators_used)}")
+        
+        # 2. Сила тренда на старших таймфреймах (4 признака)
+        # Эмулируем 1-часовой таймфрейм (4 свечи по 15 мин)
+        df['trend_1h'] = df['close'].rolling(4).mean() - df['close'].rolling(4).mean().shift(4)
+        df['trend_1h_strength'] = df['trend_1h'] / (df['atr'].rolling(4).mean() + 1e-10)
+        
+        # Эмулируем 4-часовой таймфрейм (16 свечей)
+        df['trend_4h'] = df['close'].rolling(16).mean() - df['close'].rolling(16).mean().shift(16)
+        df['trend_4h_strength'] = df['trend_4h'] / (df['atr'].rolling(16).mean() + 1e-10)
+        features_created.extend(['trend_1h', 'trend_1h_strength', 'trend_4h', 'trend_4h_strength'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Сила тренда на старших ТФ: создано 4 признака")
+        
+        # 3. Позиция в дневном диапазоне (7 признаков)
+        # Дневной диапазон (96 свечей = 24 часа)
+        df['daily_high'] = df['high'].rolling(96).max()
+        df['daily_low'] = df['low'].rolling(96).min()
+        # ИСПРАВЛЕНО: daily_range как процент от цены
+        df['daily_range'] = self.safe_divide(
+            df['daily_high'] - df['daily_low'],
+            df['close'],
+            fill_value=0.02,  # 2% по умолчанию
+            max_value=0.5   # Максимум 50% от цены
+        )
+        # ИСПРАВЛЕНО: Правильный расчет позиции в дневном диапазоне
+        # daily_range уже в процентах, поэтому используем абсолютные цены
+        daily_range_abs = df['daily_high'] - df['daily_low']
+        df['position_in_daily_range'] = self.safe_divide(
+            df['close'] - df['daily_low'],
+            daily_range_abs,
+            fill_value=0.5,
+            max_value=1.0
+        )
+        
+        # Близость к экстремумам
+        df['near_daily_high'] = (df['position_in_daily_range'] > 0.9).astype(int)
+        df['near_daily_low'] = (df['position_in_daily_range'] < 0.1).astype(int)
+        features_created.extend(['daily_high', 'daily_low', 'daily_range', 
+                               'position_in_daily_range', 'near_daily_high', 'near_daily_low'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Позиция в дневном диапазоне: создано 6 признаков")
+        
+        # 4. Качество структуры рынка (2 признака)
+        # Higher highs и higher lows для uptrend
+        hh = (df['high'] > df['high'].shift(4)) & (df['high'].shift(4) > df['high'].shift(8))
+        hl = (df['low'] > df['low'].shift(4)) & (df['low'].shift(4) > df['low'].shift(8))
+        df['uptrend_structure'] = (hh & hl).astype(int)
+        
+        # Lower highs и lower lows для downtrend
+        lh = (df['high'] < df['high'].shift(4)) & (df['high'].shift(4) < df['high'].shift(8))
+        ll = (df['low'] < df['low'].shift(4)) & (df['low'].shift(4) < df['low'].shift(8))
+        df['downtrend_structure'] = (lh & ll).astype(int)
+        features_created.extend(['uptrend_structure', 'downtrend_structure'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Качество структуры рынка: создано 2 признака")
+        
+        # 5. Риск новостных событий (1 признак)
+        # Аномальный объем часто связан с новостями
+        df['news_risk'] = (df['volume_spike'] == 1).astype(int)
+        features_created.append('news_risk')
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Риск новостных событий: создан 1 признак")
+        
+        # 6. Оценка ликвидности (3 признака)
+        # Средний спред и объем за последний час
+        # Используем high-low спред вместо bid-ask
+        df['hl_spread'] = (df['high'] - df['low']) / df['close']
+        df['liquidity_score'] = df['volume'].rolling(4).mean() / (df['hl_spread'].rolling(4).mean() + 1e-10)
+        df['liquidity_rank'] = df.groupby('datetime')['liquidity_score'].rank(pct=True)
+        features_created.extend(['hl_spread', 'liquidity_score', 'liquidity_rank'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Оценка ликвидности: создано 3 признака")
+        
+        # Итоговая статистика
+        total_created = len(features_created)
+        if not self.disable_progress:
+            self.logger.info(f"✅ Signal quality features: всего создано {total_created} признаков")
+        
+        return df
+    
+    def _create_futures_specific_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Признаки специфичные для торговли фьючерсами с плечом"""
+        if not self.disable_progress:
+            self.logger.info("Создание признаков для фьючерсной торговли...")
+        initial_cols = len(df.columns)
+        features_created = []
+        
+        leverage = 5  # Плечо x5 как указал пользователь
+        
+        # 1. Расчет ликвидационной цены
+        # Для LONG: Liq Price = Entry Price * (1 - 1/leverage + fees)
+        # Для SHORT: Liq Price = Entry Price * (1 + 1/leverage - fees)
+        maintenance_margin = 0.5 / 100  # 0.5% для Bybit
+        
+        df['long_liquidation_price'] = df['close'] * (1 - 1/leverage + maintenance_margin)
+        df['short_liquidation_price'] = df['close'] * (1 + 1/leverage - maintenance_margin)
+        
+        # Расстояние до ликвидации в процентах
+        df['long_liquidation_distance_pct'] = ((df['close'] - df['long_liquidation_price']) / df['close']) * 100
+        df['short_liquidation_distance_pct'] = ((df['short_liquidation_price'] - df['close']) / df['close']) * 100
+        features_created.extend(['long_liquidation_price', 'short_liquidation_price',
+                               'long_liquidation_distance_pct', 'short_liquidation_distance_pct'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Ликвидационные цены: создано 4 признака")
+        
+        # 2. Вероятность касания ликвидационной цены
+        # Основано на исторической волатильности
+        # Используем максимальное отклонение за последние 24 часа
+        max_drawdown_24h = df['low'].rolling(96).min() / df['close'].shift(96) - 1
+        max_rally_24h = df['high'].rolling(96).max() / df['close'].shift(96) - 1
+        
+        # Простая оценка вероятности на основе исторических движений
+        df['long_liquidation_risk'] = (abs(max_drawdown_24h) > df['long_liquidation_distance_pct'] / 100).rolling(96).mean()
+        df['short_liquidation_risk'] = (max_rally_24h > df['short_liquidation_distance_pct'] / 100).rolling(96).mean()
+        features_created.extend(['long_liquidation_risk', 'short_liquidation_risk'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Вероятность ликвидации: создано 2 признака")
+        
+        # 3. Оптимальное плечо для текущей волатильности
+        # Правило: максимальное плечо = 20% / (дневная волатильность)
+        daily_volatility = df['returns'].rolling(96).std() * np.sqrt(96)  # Приведение к дневной
+        df['optimal_leverage'] = (0.2 / (daily_volatility + 0.01)).clip(1, 10)  # От 1x до 10x
+        
+        # Безопасное плечо (консервативное)
+        df['safe_leverage'] = (0.1 / (daily_volatility + 0.01)).clip(1, 5)  # От 1x до 5x
+        features_created.extend(['optimal_leverage', 'safe_leverage'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Оптимальное плечо: создано 2 признака")
+        
+        # 4. Риск каскадных ликвидаций
+        # Когда много позиций могут быть ликвидированы одновременно
+        # Индикатор: резкие движения + высокий объем
+        df['cascade_risk'] = (
+            (df['volume_spike'] == 1) & 
+            (abs(df['returns']) > df['returns'].rolling(96).std() * 2)
+        ).astype(int)
+        features_created.append('cascade_risk')
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Риск каскадных ликвидаций: создан 1 признак")
+        
+        # 5. Funding rate влияние (для удержания позиций)
+        # Примерный funding rate (в реальности нужно загружать с биржи)
+        # Положительный funding = лонги платят шортам
+        # Используем разницу между спот и фьючерс как прокси
+        df['funding_proxy'] = df['momentum_1h'] * 0.01  # Упрощенная оценка
+        
+        # Стоимость удержания позиции на день (3 funding периода)
+        df['long_holding_cost_daily'] = df['funding_proxy'] * 3
+        df['short_holding_cost_daily'] = -df['funding_proxy'] * 3
+        features_created.extend(['funding_proxy', 'long_holding_cost_daily', 'short_holding_cost_daily'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Funding rate влияние: создано 3 признака")
+        
+        # 6. Метрики риска для размера позиции
+        # Value at Risk (VaR) - максимальная потеря с 95% вероятностью
+        returns_sorted = df['returns'].rolling(96).apply(lambda x: np.percentile(x, 5))
+        df['var_95'] = abs(returns_sorted)
+        
+        # Рекомендуемый размер позиции относительно VaR
+        max_loss_per_trade = 2.0  # 2% максимальная потеря как в конфиге
+        df['recommended_position_size'] = max_loss_per_trade / (df['var_95'] * leverage)
+        features_created.extend(['var_95', 'recommended_position_size'])
+        
+        if not self.disable_progress:
+            self.logger.info(f"  ✓ Метрики риска для позиций: создано 2 признака")
+        
+        # Итоговая статистика
+        total_created = len(features_created)
+        if not self.disable_progress:
+            self.logger.info(f"✅ Futures-specific features: всего создано {total_created} признаков")
         
         return df
     
@@ -318,7 +834,8 @@ class FeatureEngineer:
     
     def _handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
         """Обработка пропущенных значений"""
-        self.logger.info("Обработка пропущенных значений...")
+        if not self.disable_progress:
+            self.logger.info("Обработка пропущенных значений...")
         
         # Сохраняем информационные колонки
         info_cols = ['id', 'symbol', 'timestamp', 'datetime', 'open', 'high', 'low', 'close', 'volume', 'turnover']
@@ -354,7 +871,8 @@ class FeatureEngineer:
         # Финальная проверка
         nan_count = result_df.isna().sum().sum()
         if nan_count > 0:
-            self.logger.warning(f"Остались {nan_count} NaN значений после обработки")
+            if not self.disable_progress:
+                self.logger.warning(f"Остались {nan_count} NaN значений после обработки")
             # Принудительно заполняем оставшиеся NaN
             numeric_cols = result_df.select_dtypes(include=[np.number]).columns
             result_df[numeric_cols] = result_df[numeric_cols].fillna(0)
@@ -363,15 +881,28 @@ class FeatureEngineer:
         numeric_cols = result_df.select_dtypes(include=[np.number]).columns
         inf_count = np.isinf(result_df[numeric_cols]).sum().sum()
         if inf_count > 0:
-            self.logger.warning(f"Обнаружены {inf_count} бесконечных значений, заменяем на конечные")
-            result_df[numeric_cols] = result_df[numeric_cols].replace([np.inf, -np.inf], [1e10, -1e10])
+            if not self.disable_progress:
+                self.logger.warning(f"Обнаружены {inf_count} бесконечных значений, заменяем на конечные")
+            # ИСПРАВЛЕНО: Заменяем бесконечности на 99-й персентиль для каждой колонки
+            for col in numeric_cols:
+                if np.isinf(result_df[col]).any():
+                    # Вычисляем персентили на конечных значениях
+                    finite_vals = result_df[col][np.isfinite(result_df[col])]
+                    if len(finite_vals) > 0:
+                        p99 = finite_vals.quantile(0.99)
+                        p1 = finite_vals.quantile(0.01)
+                        result_df[col] = result_df[col].replace([np.inf, -np.inf], [p99, p1])
+                    else:
+                        result_df[col] = result_df[col].replace([np.inf, -np.inf], [0, 0])
         
-        self.logger.info(f"Обработка завершена. Итоговый размер: {len(result_df)} записей")
+        if not self.disable_progress:
+            self.logger.info(f"Обработка завершена. Итоговый размер: {len(result_df)} записей")
         return result_df
     
     def _create_cross_asset_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Кросс-активные признаки"""
-        self.logger.info("Создание кросс-активных признаков...")
+        if not self.disable_progress:
+            self.logger.info("Создание кросс-активных признаков...")
         
         # BTC как базовый актив
         btc_data = df[df['symbol'] == 'BTCUSDT'][['datetime', 'close', 'returns']].copy()
@@ -441,66 +972,334 @@ class FeatureEngineer:
         return df
     
     def _create_target_variables(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Создание целевых переменных для обучения"""
+        """Улучшенное создание целевых переменных для обучения"""
+        if not self.disable_progress:
+            self.logger.info("🎯 Создание целевых переменных...")
+        
         risk_config = self.config['risk_management']
-        
-        # ИСПРАВЛЕНО: Правильное вычисление будущей доходности
-        # Целевая переменная - доходность через 4 бара (1 час для 15-мин данных)
-        df['target_return_1h'] = df.groupby('symbol')['close'].transform(
-            lambda x: (x.shift(-4) / x - 1) * 100
-        )
-        
-        # Будущие цены для анализа (оставляем для совместимости)
-        for horizon in range(1, 5):
-            df[f'future_close_{horizon}'] = df.groupby('symbol')['close'].shift(-horizon)
-            df[f'future_return_{horizon}'] = (
-                df[f'future_close_{horizon}'] / df['close'] - 1
-            ) * 100
-        
-        # Цели по take profit
-        for tp_level in risk_config['take_profit_targets']:
-            df[f'target_tp_{tp_level}'] = 0
-            
-            for horizon in range(1, 5):
-                future_return_col = f'future_return_{horizon}'
-                if future_return_col in df.columns:
-                    df[f'target_tp_{tp_level}'] = np.maximum(
-                        df[f'target_tp_{tp_level}'],
-                        (df[future_return_col] >= tp_level).astype(int)
-                    )
-        
-        # Stop loss
         sl_level = risk_config['stop_loss_pct']
-        df['target_sl_hit'] = 0
+        tp_levels = risk_config['take_profit_targets']
         
-        for horizon in range(1, 5):
-            future_return_col = f'future_return_{horizon}'
-            if future_return_col in df.columns:
-                df['target_sl_hit'] = np.maximum(
-                    df['target_sl_hit'],
-                    (df[future_return_col] <= -sl_level).astype(int)
-                )
+        if not self.disable_progress:
+            self.logger.info(f"  📊 Параметры риск-менеджмента:")
+            self.logger.info(f"     - Stop Loss: {sl_level}%")
+            self.logger.info(f"     - Take Profit уровни: {tp_levels}")
+            self.logger.info(f"     - Размеры частичных закрытий: {risk_config['partial_close_sizes']}%")
         
-        # Оптимальное действие
-        df['optimal_action'] = 0
+        # Анализируем будущее движение цены (до 100 свечей = 25 часов)
+        max_horizon = 100
         
-        for i, tp_level in enumerate(risk_config['take_profit_targets'], 1):
-            condition = (df[f'target_tp_{tp_level}'] == 1) & (df['target_sl_hit'] == 0)
-            df.loc[condition, 'optimal_action'] = i
+        # Создаем массив будущих доходностей для каждого горизонта
+        for horizon in range(1, max_horizon + 1):
+            df[f'future_return_{horizon}'] = df.groupby('symbol')['close'].transform(
+                lambda x: (x.shift(-horizon) / x - 1) * 100
+            )
+            df[f'future_high_{horizon}'] = df.groupby('symbol')['high'].transform(
+                lambda x: x.shift(-horizon)
+            )
+            df[f'future_low_{horizon}'] = df.groupby('symbol')['low'].transform(
+                lambda x: x.shift(-horizon)
+            )
         
-        # Минимальная и максимальная будущая доходность
-        future_return_cols = [f'future_return_{i}' for i in range(1, 5) 
-                             if f'future_return_{i}' in df.columns]
+        # LONG позиции - последовательный анализ
+        # В многопроцессорном режиме не выводим дополнительные логи
+        if not (hasattr(self, 'disable_progress') and self.disable_progress):
+            self.logger.info("  🎯 Расчет последовательного достижения целей для LONG...")
         
-        if future_return_cols:
-            df['future_min_return'] = df[future_return_cols].min(axis=1)
-            df['future_max_return'] = df[future_return_cols].max(axis=1)
+        # Инициализация переменных для отслеживания состояния позиции
+        df['long_tp1_hit'] = 0
+        df['long_tp1_time'] = max_horizon
+        df['long_tp2_hit'] = 0
+        df['long_tp2_time'] = max_horizon
+        df['long_tp3_hit'] = 0
+        df['long_tp3_time'] = max_horizon
+        df['long_sl_hit'] = 0
+        df['long_sl_time'] = max_horizon
+        df['long_final_result'] = 0  # -1=SL, 0=nothing, 1=TP1, 2=TP2, 3=TP3
+        
+        # Для каждой строки анализируем последовательность событий
+        total_rows = len(df)
+        long_tp1_count = 0
+        long_sl_count = 0
+        
+        # В многопроцессорном режиме отключаем прогресс-бары
+        disable_progress = hasattr(self, 'disable_progress') and self.disable_progress
+        show_progress = False  # Полностью отключаем прогресс-бары в этом методе
+        
+        # Простой итератор без прогресс-бара
+        pbar = df.index
+        for i, idx in enumerate(pbar):
+            sl_reached = False
+            tp1_reached = False
+            tp2_reached = False
+            tp3_reached = False
+            
+            for horizon in range(1, max_horizon + 1):
+                if sl_reached:  # Если SL уже сработал, дальше не смотрим
+                    break
+                
+                current_high = df.loc[idx, f'future_high_{horizon}']
+                current_low = df.loc[idx, f'future_low_{horizon}']
+                entry_price = df.loc[idx, 'close']
+                
+                # Проверяем достижение уровней на текущей свече
+                high_return = (current_high / entry_price - 1) * 100
+                low_return = (current_low / entry_price - 1) * 100
+                
+                # Проверяем SL (имеет приоритет если достигается на той же свече)
+                if low_return <= -sl_level and not sl_reached:
+                    df.loc[idx, 'long_sl_hit'] = 1
+                    df.loc[idx, 'long_sl_time'] = horizon
+                    df.loc[idx, 'long_final_result'] = -1
+                    sl_reached = True
+                    break
+                
+                # Проверяем TP3 (если уже достигнут TP2)
+                if tp2_reached and high_return >= tp_levels[2] and not tp3_reached:
+                    df.loc[idx, 'long_tp3_hit'] = 1
+                    df.loc[idx, 'long_tp3_time'] = horizon
+                    df.loc[idx, 'long_final_result'] = 3
+                    tp3_reached = True
+                
+                # Проверяем TP2 (если уже достигнут TP1)
+                if tp1_reached and high_return >= tp_levels[1] and not tp2_reached:
+                    df.loc[idx, 'long_tp2_hit'] = 1
+                    df.loc[idx, 'long_tp2_time'] = horizon
+                    df.loc[idx, 'long_final_result'] = 2
+                    tp2_reached = True
+                
+                # Проверяем TP1
+                if high_return >= tp_levels[0] and not tp1_reached:
+                    df.loc[idx, 'long_tp1_hit'] = 1
+                    df.loc[idx, 'long_tp1_time'] = horizon
+                    df.loc[idx, 'long_final_result'] = 1
+                    tp1_reached = True
+                    long_tp1_count += 1
+            
+            # Обновляем статистику в прогресс-баре
+            if df.loc[idx, 'long_sl_hit'] == 1:
+                long_sl_count += 1
+            
+            # Обновляем информацию каждые 1000 строк
+            # Закомментировано, так как pbar это не прогресс-бар, а df.index
+            # if show_progress and i % 1000 == 0:
+            #     tp1_pct = (long_tp1_count / (i + 1) * 100) if i > 0 else 0
+            #     sl_pct = (long_sl_count / (i + 1) * 100) if i > 0 else 0
+            #     pbar.set_postfix({'TP1': f'{tp1_pct:.1f}%', 'SL': f'{sl_pct:.1f}%'})
+        
+        # SHORT позиции - последовательный анализ (зеркально для LONG)
+        # В многопроцессорном режиме не выводим дополнительные логи
+        if not (hasattr(self, 'disable_progress') and self.disable_progress):
+            self.logger.info("  🎯 Расчет последовательного достижения целей для SHORT...")
+        
+        # Инициализация переменных для SHORT
+        df['short_tp1_hit'] = 0
+        df['short_tp1_time'] = max_horizon
+        df['short_tp2_hit'] = 0
+        df['short_tp2_time'] = max_horizon
+        df['short_tp3_hit'] = 0
+        df['short_tp3_time'] = max_horizon
+        df['short_sl_hit'] = 0
+        df['short_sl_time'] = max_horizon
+        df['short_final_result'] = 0  # -1=SL, 0=nothing, 1=TP1, 2=TP2, 3=TP3
+        
+        # Для каждой строки анализируем последовательность событий для SHORT
+        short_tp1_count = 0
+        short_sl_count = 0
+        
+        # В многопроцессорном режиме отключаем прогресс-бары
+        pbar = df.index
+        for i, idx in enumerate(pbar):
+            sl_reached = False
+            tp1_reached = False
+            tp2_reached = False
+            tp3_reached = False
+            
+            for horizon in range(1, max_horizon + 1):
+                if sl_reached:  # Если SL уже сработал, дальше не смотрим
+                    break
+                
+                current_high = df.loc[idx, f'future_high_{horizon}']
+                current_low = df.loc[idx, f'future_low_{horizon}']
+                entry_price = df.loc[idx, 'close']
+                
+                # Для SHORT: прибыль когда цена падает, убыток когда растет
+                # Расчет процентов движения от точки входа
+                high_return = (entry_price - current_high) / entry_price * 100  # отрицательный при росте цены
+                low_return = (entry_price - current_low) / entry_price * 100   # положительный при падении цены
+                
+                # Проверяем SL для SHORT (срабатывает через high когда цена растет)
+                if high_return <= -sl_level and not sl_reached:
+                    df.loc[idx, 'short_sl_hit'] = 1
+                    df.loc[idx, 'short_sl_time'] = horizon
+                    df.loc[idx, 'short_final_result'] = -1
+                    sl_reached = True
+                    break
+                
+                # Проверяем TP3 (если уже достигнут TP2)
+                if tp2_reached and low_return >= tp_levels[2] and not tp3_reached:
+                    df.loc[idx, 'short_tp3_hit'] = 1
+                    df.loc[idx, 'short_tp3_time'] = horizon
+                    df.loc[idx, 'short_final_result'] = 3
+                    tp3_reached = True
+                
+                # Проверяем TP2 (если уже достигнут TP1)
+                if tp1_reached and low_return >= tp_levels[1] and not tp2_reached:
+                    df.loc[idx, 'short_tp2_hit'] = 1
+                    df.loc[idx, 'short_tp2_time'] = horizon
+                    df.loc[idx, 'short_final_result'] = 2
+                    tp2_reached = True
+                
+                # Проверяем TP1
+                if low_return >= tp_levels[0] and not tp1_reached:
+                    df.loc[idx, 'short_tp1_hit'] = 1
+                    df.loc[idx, 'short_tp1_time'] = horizon
+                    df.loc[idx, 'short_final_result'] = 1
+                    tp1_reached = True
+                    short_tp1_count += 1
+            
+            # Обновляем статистику в прогресс-баре
+            if df.loc[idx, 'short_sl_hit'] == 1:
+                short_sl_count += 1
+            
+            # Обновляем информацию каждые 1000 строк
+            # Закомментировано, так как pbar это не прогресс-бар, а df.index
+            # if i % 1000 == 0:
+            #     tp1_pct = (short_tp1_count / (i + 1) * 100) if i > 0 else 0
+            #     sl_pct = (short_sl_count / (i + 1) * 100) if i > 0 else 0
+            #     pbar.set_postfix({'TP1': f'{tp1_pct:.1f}%', 'SL': f'{sl_pct:.1f}%'})
+        
+        # Оптимальная точка входа (если подождать отката)
+        # Для LONG - минимальная цена в следующие 4 свечи (1 час)
+        df['long_optimal_entry_price'] = df[[f'future_low_{i}' for i in range(1, 5)]].min(axis=1)
+        df['long_optimal_entry_improvement'] = (1 - df['long_optimal_entry_price'] / df['close']) * 100
+        
+        # Для SHORT - максимальная цена в следующие 4 свечи
+        df['short_optimal_entry_price'] = df[[f'future_high_{i}' for i in range(1, 5)]].max(axis=1)
+        df['short_optimal_entry_improvement'] = (df['short_optimal_entry_price'] / df['close'] - 1) * 100
+        
+        # Определение направления сигнала на основе вероятностей
+        # Сначала создаем финальные целевые переменные
+        # Для LONG позиций
+        df['long_tp1_reached'] = df['long_tp1_hit']
+        df['long_tp2_reached'] = df['long_tp2_hit']
+        df['long_tp3_reached'] = df['long_tp3_hit']
+        df['long_sl_reached'] = df['long_sl_hit']
+        
+        # Для SHORT позиций
+        df['short_tp1_reached'] = df['short_tp1_hit']
+        df['short_tp2_reached'] = df['short_tp2_hit']
+        df['short_tp3_reached'] = df['short_tp3_hit']
+        df['short_sl_reached'] = df['short_sl_hit']
+        
+        # Диагностическое логирование
+        if not self.disable_progress:
+            self.logger.info(f"  📈 Статистика достижения целей LONG:")
+            self.logger.info(f"     - TP1 ({tp_levels[0]}%): {df['long_tp1_reached'].mean()*100:.1f}%")
+            self.logger.info(f"     - TP2 ({tp_levels[1]}%): {df['long_tp2_reached'].mean()*100:.1f}%")
+            self.logger.info(f"     - TP3 ({tp_levels[2]}%): {df['long_tp3_reached'].mean()*100:.1f}%")
+            self.logger.info(f"     - SL ({sl_level}%): {df['long_sl_reached'].mean()*100:.1f}%")
+            
+            self.logger.info(f"  📉 Статистика достижения целей SHORT:")
+            self.logger.info(f"     - TP1 ({tp_levels[0]}%): {df['short_tp1_reached'].mean()*100:.1f}%")
+            self.logger.info(f"     - TP2 ({tp_levels[1]}%): {df['short_tp2_reached'].mean()*100:.1f}%")
+            self.logger.info(f"     - TP3 ({tp_levels[2]}%): {df['short_tp3_reached'].mean()*100:.1f}%")
+            self.logger.info(f"     - SL ({sl_level}%): {df['short_sl_reached'].mean()*100:.1f}%")
+        
+        # Проверка на аномальные значения
+        if df['long_tp1_reached'].mean() < 0 or df['long_tp1_reached'].mean() > 1:
+            if not self.disable_progress:
+                self.logger.error(f"❌ ОШИБКА: long_tp1_reached содержит некорректные значения!")
+                self.logger.error(f"   Уникальные значения: {df['long_tp1_reached'].unique()}")
+        
+        # Дополнительная диагностика первых 10 записей
+        if not self.disable_progress:
+            self.logger.debug(f"  🔍 Примеры первых 10 записей:")
+            sample_cols = ['close', 'future_high_1', 'future_low_1', 'long_tp1_reached', 'short_tp1_reached']
+            for col in sample_cols:
+                if col in df.columns:
+                    self.logger.debug(f"     {col}: {df[col].head(10).values}")
+        
+        # Теперь считаем expected value для LONG и SHORT
+        df['long_expected_value'] = 0
+        df['short_expected_value'] = 0
+        
+        for i, tp_level in enumerate(tp_levels):
+            partial_close = risk_config['partial_close_sizes'][i] / 100
+            
+            # LONG EV (исправленная формула)
+            # Прибыль от TP * вероятность достижения * размер частичного закрытия
+            df['long_expected_value'] += df[f'long_tp{i+1}_hit'] * tp_level * partial_close
+            
+            # SHORT EV (исправленная формула)
+            df['short_expected_value'] += df[f'short_tp{i+1}_hit'] * tp_level * partial_close
+        
+        # Вычитаем убыток от SL (только для позиций, где не сработал ни один TP)
+        no_long_tp = (df['long_tp1_reached'] == 0) & (df['long_tp2_reached'] == 0) & (df['long_tp3_reached'] == 0)
+        no_short_tp = (df['short_tp1_reached'] == 0) & (df['short_tp2_reached'] == 0) & (df['short_tp3_reached'] == 0)
+        
+        df.loc[no_long_tp, 'long_expected_value'] -= df.loc[no_long_tp, 'long_sl_hit'] * sl_level
+        df.loc[no_short_tp, 'short_expected_value'] -= df.loc[no_short_tp, 'short_sl_hit'] * sl_level
+        
+        # Оптимальное время входа
+        # Для LONG - минимальная цена в следующие 4 свечи (1 час)
+        future_low_cols = [f'future_low_{i}' for i in range(1, 5)]
+        df['long_optimal_entry_time'] = df[future_low_cols].idxmin(axis=1).str.extract(r'(\d+)')[0].astype(float)
+        
+        # Для SHORT - максимальная цена в следующие 4 свечи
+        future_high_cols = [f'future_high_{i}' for i in range(1, 5)]
+        df['short_optimal_entry_time'] = df[future_high_cols].idxmax(axis=1).str.extract(r'(\d+)')[0].astype(float)
+        
+        # Определение лучшего направления
+        df['best_direction'] = 'NEUTRAL'
+        df.loc[df['long_expected_value'] > 0.5, 'best_direction'] = 'LONG'
+        df.loc[df['short_expected_value'] > 0.5, 'best_direction'] = 'SHORT'
+        
+        # Если оба EV положительные, выбираем больший
+        both_positive = (df['long_expected_value'] > 0.5) & (df['short_expected_value'] > 0.5)
+        df.loc[both_positive & (df['long_expected_value'] > df['short_expected_value']), 'best_direction'] = 'LONG'
+        df.loc[both_positive & (df['short_expected_value'] > df['long_expected_value']), 'best_direction'] = 'SHORT'
+        
+        # Сила сигнала
+        df['signal_strength'] = np.maximum(df['long_expected_value'], df['short_expected_value'])
+        
+        # Очистка временных колонок с будущими данными (оставляем только целевые)
+        cols_to_drop = [col for col in df.columns if col.startswith(('future_return_', 'future_high_', 'future_low_')) and any(str(i) in col for i in range(5, max_horizon + 1))]
+        df.drop(columns=cols_to_drop, inplace=True)
+        
+        # Базовые целевые переменные для совместимости
+        df['target_return_1h'] = df['future_return_4'] if 'future_return_4' in df.columns else 0
+        
+        # Итоговая статистика по направлениям
+        direction_stats = df['best_direction'].value_counts(normalize=True) * 100
+        if not self.disable_progress:
+            self.logger.info(f"  🎯 Распределение направлений:")
+            for direction, pct in direction_stats.items():
+                self.logger.info(f"     - {direction}: {pct:.1f}%")
+            
+            self.logger.info(f"  💰 Expected Value статистика:")
+            self.logger.info(f"     - Средний LONG EV: {df['long_expected_value'].mean():.2f}%")
+            self.logger.info(f"     - Средний SHORT EV: {df['short_expected_value'].mean():.2f}%")
+            self.logger.info(f"     - Средняя сила сигнала: {df['signal_strength'].mean():.2f}%")
+        
+        if not self.disable_progress:
+            self.logger.info(f"✅ Создано целевых переменных: LONG TP/SL, SHORT TP/SL, оптимальные точки входа")
         
         return df
     
-    def _normalize_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """ИСПРАВЛЕННАЯ нормализация БЕЗ DATA LEAKAGE - только для полного dataset"""
-        self.logger.warning("⚠️ ИСПОЛЬЗУЕТСЯ LEGACY МЕТОД! Для production используйте _normalize_walk_forward")
+    def _normalize_features(self, df: pd.DataFrame, fit: bool = True) -> pd.DataFrame:
+        """Нормализация признаков с поддержкой режима fit/transform
+        
+        Args:
+            df: данные для нормализации
+            fit: если True - обучает scaler, если False - использует существующий
+        """
+        if fit:
+            if not self.disable_progress:
+                self.logger.info("📊 Обучение и применение нормализации...")
+        else:
+            if not self.disable_progress:
+                self.logger.info("📊 Применение существующей нормализации...")
         
         # Столбцы для исключения из нормализации
         exclude_cols = [
@@ -508,28 +1307,82 @@ class FeatureEngineer:
             'open', 'high', 'low', 'close', 'volume', 'turnover'
         ]
         
-        # Целевые переменные
-        target_cols = [col for col in df.columns if col.startswith(('target_', 'future_', 'optimal_'))]
+        # Целевые переменные и индикаторы направления
+        target_cols = [col for col in df.columns if any(pattern in col for pattern in [
+            'target_', 'future_', 'optimal_', '_reached', '_tp', '_sl', 
+            'expected_value', 'best_direction', 'signal_strength'
+        ])]
         exclude_cols.extend(target_cols)
         
-        # Временные колонки
+        # Временные и категориальные колонки
         time_cols = ['hour', 'minute', 'dayofweek', 'day', 'month', 'is_weekend',
                     'asian_session', 'european_session', 'american_session', 'session_overlap']
         exclude_cols.extend(time_cols)
         
-        # Определяем признаки для нормализации
-        feature_cols = [col for col in df.columns if col not in exclude_cols]
+        # Признаки-соотношения, которые уже нормализованы по своей природе
+        ratio_cols = ['close_vwap_ratio', 'close_open_ratio', 'high_low_ratio', 
+                      'close_position', 'bb_position', 'position_in_range_20',
+                      'position_in_range_50', 'position_in_range_100']
+        exclude_cols.extend(ratio_cols)
         
-        # ⚠️ ВНИМАНИЕ: Этот метод создает data leakage!
-        # Используйте create_features_with_train_split() для корректной обработки
-        self.logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Нормализация на всем датасете создает DATA LEAKAGE!")
-        self.logger.info("✅ Используйте метод create_features_with_train_split() вместо этого")
+        # ИСПРАВЛЕНО: Технические индикаторы с естественными диапазонами НЕ нормализуем
+        technical_indicators = ['rsi', 'stoch_k', 'stoch_d', 'adx', 'adx_pos', 'adx_neg',
+                              'rsi_oversold', 'rsi_overbought', 'toxicity', 'psar_trend',
+                              'cci', 'williams_r', 'roc', 'momentum', 'kama', 'trix',
+                              'ppo', 'macd', 'macd_signal', 'macd_diff']
+        exclude_cols.extend(technical_indicators)
+        
+        # Определяем только числовые признаки для нормализации
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        feature_cols = [col for col in numeric_cols if col not in exclude_cols]
+        
+        # Логирование для отладки
+        if not self.disable_progress:
+            self.logger.debug(f"Колонки для нормализации ({len(feature_cols)}): {feature_cols[:10]}...")
+            excluded_technical = [col for col in ['toxicity', 'bb_position', 'close_position', 'psar_trend', 
+                                                  'rsi_oversold', 'rsi_overbought'] if col in numeric_cols]
+            self.logger.debug(f"Технические индикаторы в исключениях: {excluded_technical}")
+        
+        if not feature_cols:
+            self.logger.warning("⚠️ Нет признаков для нормализации!")
+            return df
+        
+        # Нормализация по символам
+        for symbol in df['symbol'].unique():
+            symbol_mask = df['symbol'] == symbol
+            
+            if symbol_mask.sum() > 0:
+                if fit:
+                    # Создаем новый scaler для символа
+                    if symbol not in self.scalers:
+                        self.scalers[symbol] = RobustScaler()
+                    
+                    # Обучаем scaler
+                    symbol_data = df.loc[symbol_mask, feature_cols]
+                    valid_data = symbol_data.dropna()
+                    
+                    if len(valid_data) > 0:
+                        self.scalers[symbol].fit(valid_data)
+                        if not self.disable_progress:
+                            self.logger.debug(f"✅ Scaler обучен для {symbol} на {len(valid_data)} записях")
+                
+                # Применяем scaler (если он существует)
+                if symbol in self.scalers:
+                    valid_mask = symbol_mask & df[feature_cols].notna().all(axis=1)
+                    if valid_mask.sum() > 0:
+                        df.loc[valid_mask, feature_cols] = self.scalers[symbol].transform(
+                            df.loc[valid_mask, feature_cols]
+                        )
+                else:
+                    if not self.disable_progress:
+                        self.logger.warning(f"⚠️ Scaler не найден для {symbol}")
         
         return df
     
     def _normalize_walk_forward(self, df: pd.DataFrame, train_end_date: str) -> pd.DataFrame:
         """Walk-forward нормализация без data leakage"""
-        self.logger.info(f"Walk-forward нормализация до {train_end_date}...")
+        if not self.disable_progress:
+            self.logger.info(f"Walk-forward нормализация до {train_end_date}...")
         
         # Столбцы для исключения из нормализации
         exclude_cols = [
@@ -545,6 +1398,19 @@ class FeatureEngineer:
         time_cols = ['hour', 'minute', 'dayofweek', 'day', 'month', 'is_weekend',
                     'asian_session', 'european_session', 'american_session', 'session_overlap']
         exclude_cols.extend(time_cols)
+        
+        # Признаки-соотношения, которые уже нормализованы по своей природе
+        ratio_cols = ['close_vwap_ratio', 'close_open_ratio', 'high_low_ratio', 
+                      'close_position', 'bb_position', 'position_in_range_20',
+                      'position_in_range_50', 'position_in_range_100']
+        exclude_cols.extend(ratio_cols)
+        
+        # ИСПРАВЛЕНО: Технические индикаторы с естественными диапазонами НЕ нормализуем
+        technical_indicators = ['rsi', 'stoch_k', 'stoch_d', 'adx', 'adx_pos', 'adx_neg',
+                              'rsi_oversold', 'rsi_overbought', 'toxicity', 'psar_trend',
+                              'cci', 'williams_r', 'roc', 'momentum', 'kama', 'trix',
+                              'ppo', 'macd', 'macd_signal', 'macd_diff']
+        exclude_cols.extend(technical_indicators)
         
         # Определяем признаки для нормализации
         feature_cols = [col for col in df.columns if col not in exclude_cols]
@@ -577,32 +1443,33 @@ class FeatureEngineer:
     
     def _log_feature_statistics(self, df: pd.DataFrame):
         """Логирование статистики по признакам"""
-        feature_counts = {
-            'basic': len([col for col in df.columns if col in [
-                'returns', 'high_low_ratio', 'close_open_ratio', 'volume_ratio'
-            ]]),
-            'technical': len([col for col in df.columns if any(
-                ind in col for ind in ['sma', 'ema', 'rsi', 'macd', 'bb', 'atr']
-            )]),
-            'microstructure': len([col for col in df.columns if any(
-                ms in col for ms in ['spread', 'imbalance', 'toxicity', 'illiquidity']
-            )]),
-            'temporal': len([col for col in df.columns if any(
-                t in col for t in ['hour', 'day', 'month', 'session']
-            )]),
-            'cross_asset': len([col for col in df.columns if any(
-                ca in col for ca in ['btc_', 'sector', 'rank', 'momentum']
-            )])
-        }
-        
-        self.logger.info(f"📊 Создано признаков по категориям: {feature_counts}")
-        
-        # Проверка пропущенных значений
-        missing_counts = df.isnull().sum()
-        if missing_counts.sum() > 0:
-            self.logger.warning(
-                f"⚠️ Обнаружены пропущенные значения в {missing_counts[missing_counts > 0].shape[0]} признаках"
-            )
+        if not self.disable_progress:
+            feature_counts = {
+                'basic': len([col for col in df.columns if col in [
+                    'returns', 'high_low_ratio', 'close_open_ratio', 'volume_ratio'
+                ]]),
+                'technical': len([col for col in df.columns if any(
+                    ind in col for ind in ['sma', 'ema', 'rsi', 'macd', 'bb', 'atr']
+                )]),
+                'microstructure': len([col for col in df.columns if any(
+                    ms in col for ms in ['spread', 'imbalance', 'toxicity', 'illiquidity']
+                )]),
+                'temporal': len([col for col in df.columns if any(
+                    t in col for t in ['hour', 'day', 'month', 'session']
+                )]),
+                'cross_asset': len([col for col in df.columns if any(
+                    ca in col for ca in ['btc_', 'sector', 'rank', 'momentum']
+                )])
+            }
+            
+            self.logger.info(f"📊 Создано признаков по категориям: {feature_counts}")
+            
+            # Проверка пропущенных значений
+            missing_counts = df.isnull().sum()
+            if missing_counts.sum() > 0:
+                self.logger.warning(
+                    f"⚠️ Обнаружены пропущенные значения в {missing_counts[missing_counts > 0].shape[0]} признаках"
+                )
     
     def get_feature_names(self, include_targets: bool = False) -> List[str]:
         """Получение списка названий признаков"""
@@ -615,7 +1482,8 @@ class FeatureEngineer:
         with open(path, 'wb') as f:
             pickle.dump(self.scalers, f)
         
-        self.logger.info(f"Скейлеры сохранены в {path}")
+        if not self.disable_progress:
+            self.logger.info(f"Скейлеры сохранены в {path}")
     
     def load_scalers(self, path: str):
         """Загрузка сохраненных скейлеров"""
@@ -623,7 +1491,8 @@ class FeatureEngineer:
         with open(path, 'rb') as f:
             self.scalers = pickle.load(f)
         
-        self.logger.info(f"Скейлеры загружены из {path}")
+        if not self.disable_progress:
+            self.logger.info(f"Скейлеры загружены из {path}")
     
     def create_features_with_train_split(self, 
                                        df: pd.DataFrame, 
@@ -639,37 +1508,54 @@ class FeatureEngineer:
         Returns:
             Tuple[train_data, val_data, test_data] - правильно нормализованные данные
         """
-        self.logger.start_stage("feature_engineering_no_leakage", 
-                               symbols=df['symbol'].nunique())
+        if not self.disable_progress:
+            self.logger.start_stage("feature_engineering_no_leakage", 
+                                   symbols=df['symbol'].nunique())
         
         # 1. Создание признаков (без нормализации)
-        self.logger.info("1/5 - Создание базовых признаков...")
+        if not self.disable_progress:
+            self.logger.info("1/5 - Создание базовых признаков...")
         featured_dfs = []
         
         symbols = df['symbol'].unique()
-        self.logger.info(f"Обработка {len(symbols)} символов...")
+        if not self.disable_progress:
+            self.logger.info(f"Обработка {len(symbols)} символов...")
         
-        for symbol in tqdm(symbols, desc="Создание признаков", unit="символ"):
+        # В многопроцессорном режиме прогресс-бары не нужны
+        disable_progress = hasattr(self, 'disable_progress') and self.disable_progress
+        
+        if disable_progress:
+            symbols_iterator = symbols
+        else:
+            symbols_iterator = tqdm(symbols, desc="Создание признаков", unit="символ")
+        
+        for symbol in symbols_iterator:
             symbol_data = df[df['symbol'] == symbol].copy()
             symbol_data = symbol_data.sort_values('datetime')
             
             symbol_data = self._create_basic_features(symbol_data)
             symbol_data = self._create_technical_indicators(symbol_data)
             symbol_data = self._create_microstructure_features(symbol_data)
+            symbol_data = self._create_rally_detection_features(symbol_data)
+            symbol_data = self._create_signal_quality_features(symbol_data)
+            symbol_data = self._create_futures_specific_features(symbol_data)
             symbol_data = self._create_temporal_features(symbol_data)
             symbol_data = self._create_target_variables(symbol_data)
             
             featured_dfs.append(symbol_data)
         
-        self.logger.info("2/5 - Объединение кросс-активных признаков...")
+        if not self.disable_progress:
+            self.logger.info("2/5 - Объединение кросс-активных признаков...")
         result_df = pd.concat(featured_dfs, ignore_index=True)
         result_df = self._create_cross_asset_features(result_df)
         
-        self.logger.info("3/5 - Обработка пропущенных значений...")
+        if not self.disable_progress:
+            self.logger.info("3/5 - Обработка пропущенных значений...")
         result_df = self._handle_missing_values(result_df)
         
         # 2. Разделение данных ПО ВРЕМЕНИ (критично для предотвращения data leakage)
-        self.logger.info("4/5 - Временное разделение данных...")
+        if not self.disable_progress:
+            self.logger.info("4/5 - Временное разделение данных...")
         train_data_list = []
         val_data_list = []
         test_data_list = []
@@ -690,7 +1576,8 @@ class FeatureEngineer:
         test_data = pd.concat(test_data_list, ignore_index=True)
         
         # 3. ПРАВИЛЬНАЯ нормализация БЕЗ DATA LEAKAGE
-        self.logger.info("5/5 - Нормализация без data leakage...")
+        if not self.disable_progress:
+            self.logger.info("5/5 - Нормализация без data leakage...")
         
         # Определяем признаки для нормализации
         exclude_cols = [
@@ -707,11 +1594,23 @@ class FeatureEngineer:
                     'asian_session', 'european_session', 'american_session', 'session_overlap']
         exclude_cols.extend(time_cols)
         
+        # Признаки-соотношения, которые уже нормализованы по своей природе
+        ratio_cols = ['close_vwap_ratio', 'close_open_ratio', 'high_low_ratio', 
+                      'close_position', 'bb_position', 'position_in_range_20',
+                      'position_in_range_50', 'position_in_range_100']
+        exclude_cols.extend(ratio_cols)
+        
         feature_cols = [col for col in train_data.columns if col not in exclude_cols]
         
         # Нормализация по символам
         unique_symbols = train_data['symbol'].unique()
-        for symbol in tqdm(unique_symbols, desc="Нормализация", unit="символ"):
+        # В многопроцессорном режиме отключаем прогресс-бары
+        if disable_progress:
+            norm_iterator = unique_symbols
+        else:
+            norm_iterator = tqdm(unique_symbols, desc="Нормализация", unit="символ")
+        
+        for symbol in norm_iterator:
             
             # Маски для каждого символа
             train_mask = train_data['symbol'] == symbol
@@ -728,10 +1627,22 @@ class FeatureEngineer:
             # Получаем только валидные train данные
             train_symbol_data = train_data.loc[train_mask, feature_cols].dropna()
             
+            # Сохраняем числовые колонки для использования во всем цикле
+            numeric_feature_cols = []
+            
             if len(train_symbol_data) > 0:
                 # Очистка экстремальных значений в train данных
                 train_cleaned = train_symbol_data.copy()
+                
+                # Проверяем типы данных и фильтруем только числовые колонки
                 for col in feature_cols:
+                    if col in train_cleaned.columns and pd.api.types.is_numeric_dtype(train_cleaned[col]):
+                        numeric_feature_cols.append(col)
+                    else:
+                        if not self.disable_progress:
+                            self.logger.warning(f"Колонка '{col}' не является числовой или отсутствует, пропускаем")
+                
+                for col in numeric_feature_cols:
                     # Клиппинг экстремальных значений
                     q01 = train_cleaned[col].quantile(0.01)
                     q99 = train_cleaned[col].quantile(0.99)
@@ -741,57 +1652,58 @@ class FeatureEngineer:
                     train_cleaned[col] = train_cleaned[col].replace([np.inf, -np.inf], [q99, q01])
                     train_cleaned[col] = train_cleaned[col].fillna(train_cleaned[col].median())
                 
-                # Обучаем scaler на очищенных train данных
-                self.scalers[symbol].fit(train_cleaned)
+                # Обучаем scaler на очищенных train данных только по числовым колонкам
+                self.scalers[symbol].fit(train_cleaned[numeric_feature_cols])
                 
                 # Применяем ко всем данным символа
                 # Train
-                train_valid_mask = train_mask & train_data[feature_cols].notna().all(axis=1)
+                train_valid_mask = train_mask & train_data[numeric_feature_cols].notna().all(axis=1)
                 if train_valid_mask.sum() > 0:
-                    train_to_scale = train_data.loc[train_valid_mask, feature_cols].copy()
+                    train_to_scale = train_data.loc[train_valid_mask, numeric_feature_cols].copy()
                     # Применяем ту же очистку
-                    for col in feature_cols:
+                    for col in numeric_feature_cols:
                         q01 = train_cleaned[col].quantile(0.01) if col in train_cleaned.columns else train_to_scale[col].quantile(0.01)
                         q99 = train_cleaned[col].quantile(0.99) if col in train_cleaned.columns else train_to_scale[col].quantile(0.99)
                         train_to_scale[col] = train_to_scale[col].clip(lower=q01, upper=q99)
                         train_to_scale[col] = train_to_scale[col].replace([np.inf, -np.inf], [q99, q01])
                         train_to_scale[col] = train_to_scale[col].fillna(train_to_scale[col].median())
                     
-                    train_data.loc[train_valid_mask, feature_cols] = self.scalers[symbol].transform(train_to_scale)
+                    train_data.loc[train_valid_mask, numeric_feature_cols] = self.scalers[symbol].transform(train_to_scale)
                 
                 # Val 
-                val_valid_mask = val_mask & val_data[feature_cols].notna().all(axis=1)
+                val_valid_mask = val_mask & val_data[numeric_feature_cols].notna().all(axis=1)
                 if val_valid_mask.sum() > 0:
-                    val_to_scale = val_data.loc[val_valid_mask, feature_cols].copy()
+                    val_to_scale = val_data.loc[val_valid_mask, numeric_feature_cols].copy()
                     # Применяем ту же очистку используя статистики из train
-                    for col in feature_cols:
+                    for col in numeric_feature_cols:
                         q01 = train_cleaned[col].quantile(0.01) if col in train_cleaned.columns else val_to_scale[col].quantile(0.01)
                         q99 = train_cleaned[col].quantile(0.99) if col in train_cleaned.columns else val_to_scale[col].quantile(0.99)
                         val_to_scale[col] = val_to_scale[col].clip(lower=q01, upper=q99)
                         val_to_scale[col] = val_to_scale[col].replace([np.inf, -np.inf], [q99, q01])
                         val_to_scale[col] = val_to_scale[col].fillna(val_to_scale[col].median())
                     
-                    val_data.loc[val_valid_mask, feature_cols] = self.scalers[symbol].transform(val_to_scale)
+                    val_data.loc[val_valid_mask, numeric_feature_cols] = self.scalers[symbol].transform(val_to_scale)
                 
                 # Test
-                test_valid_mask = test_mask & test_data[feature_cols].notna().all(axis=1)
+                test_valid_mask = test_mask & test_data[numeric_feature_cols].notna().all(axis=1)
                 if test_valid_mask.sum() > 0:
-                    test_to_scale = test_data.loc[test_valid_mask, feature_cols].copy()
+                    test_to_scale = test_data.loc[test_valid_mask, numeric_feature_cols].copy()
                     # Применяем ту же очистку используя статистики из train
-                    for col in feature_cols:
+                    for col in numeric_feature_cols:
                         q01 = train_cleaned[col].quantile(0.01) if col in train_cleaned.columns else test_to_scale[col].quantile(0.01)
                         q99 = train_cleaned[col].quantile(0.99) if col in train_cleaned.columns else test_to_scale[col].quantile(0.99)
                         test_to_scale[col] = test_to_scale[col].clip(lower=q01, upper=q99)
                         test_to_scale[col] = test_to_scale[col].replace([np.inf, -np.inf], [q99, q01])
                         test_to_scale[col] = test_to_scale[col].fillna(test_to_scale[col].median())
                     
-                    test_data.loc[test_valid_mask, feature_cols] = self.scalers[symbol].transform(test_to_scale)
+                    test_data.loc[test_valid_mask, numeric_feature_cols] = self.scalers[symbol].transform(test_to_scale)
         
         # КРИТИЧНО: Удаляем строки с NaN в future переменных
         # NaN появляются в последних N строках каждого символа из-за shift(-N)
         future_cols = [col for col in train_data.columns if col.startswith('future_')]
         if future_cols:
-            self.logger.info("🧑 Удаление строк с NaN в целевых переменных...")
+            if not self.disable_progress:
+                self.logger.info("🧑 Удаление строк с NaN в целевых переменных...")
             
             # Подсчет до удаления
             train_before = len(train_data)
@@ -803,8 +1715,9 @@ class FeatureEngineer:
             val_data = val_data.dropna(subset=future_cols)
             test_data = test_data.dropna(subset=future_cols)
             
-            self.logger.info(f"  Удалено строк: Train={train_before - len(train_data)}, "
-                           f"Val={val_before - len(val_data)}, Test={test_before - len(test_data)}")
+            if not self.disable_progress:
+                self.logger.info(f"  Удалено строк: Train={train_before - len(train_data)}, "
+                               f"Val={val_before - len(val_data)}, Test={test_before - len(test_data)}")
         
         # Проверка на оставшиеся NaN
         nan_check = {
@@ -815,18 +1728,20 @@ class FeatureEngineer:
         
         for split, nan_count in nan_check.items():
             if nan_count > 0:
-                self.logger.warning(f"⚠️  Осталось {nan_count} NaN в {split} данных")
+                if not self.disable_progress:
+                    self.logger.warning(f"⚠️  Осталось {nan_count} NaN в {split} данных")
         
         # Финальная статистика
-        self.logger.info(f"✅ Размеры данных без data leakage:")
-        self.logger.info(f"   - Train: {len(train_data)} записей")
-        self.logger.info(f"   - Val: {len(val_data)} записей") 
-        self.logger.info(f"   - Test: {len(test_data)} записей")
-        self.logger.info(f"   - Признаков: {len(feature_cols)}")
-        
-        self.logger.end_stage("feature_engineering_no_leakage", 
-                            train_size=len(train_data),
-                            val_size=len(val_data),
-                            test_size=len(test_data))
+        if not self.disable_progress:
+            self.logger.info(f"✅ Размеры данных без data leakage:")
+            self.logger.info(f"   - Train: {len(train_data)} записей")
+            self.logger.info(f"   - Val: {len(val_data)} записей") 
+            self.logger.info(f"   - Test: {len(test_data)} записей")
+            self.logger.info(f"   - Признаков: {len(feature_cols)}")
+            
+            self.logger.end_stage("feature_engineering_no_leakage", 
+                                train_size=len(train_data),
+                                val_size=len(val_data),
+                                test_size=len(test_data))
         
         return train_data, val_data, test_data

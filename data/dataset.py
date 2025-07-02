@@ -12,6 +12,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from utils.logger import get_logger
+from data.constants import TRADING_TARGET_VARIABLES, SERVICE_COLUMNS, get_feature_columns
 
 class TimeSeriesDataset(Dataset):
     """Dataset для временных рядов криптовалют"""
@@ -48,8 +49,11 @@ class TimeSeriesDataset(Dataset):
             self.feature_cols = feature_cols
             
         if target_cols is None:
+            # Обновленный список целевых переменных для торговой модели
             self.target_cols = [col for col in data.columns 
-                              if col.startswith(('target_', 'future_return_'))]
+                              if col.startswith(('target_', 'future_return_', 'long_tp', 'short_tp', 
+                                               'long_sl', 'short_sl', 'long_optimal', 'short_optimal',
+                                               'best_direction'))]
         else:
             self.target_cols = target_cols
         
@@ -98,14 +102,66 @@ class TimeSeriesDataset(Dataset):
         # ИСПРАВЛЕНО: Целевые переменные берем из последней строки контекста
         # а не из будущих строк!
         
-        # Преобразование в тензоры
-        X = torch.FloatTensor(context_data[self.feature_cols].values)
+        # Преобразование в тензоры с обработкой object типов
+        feature_data = context_data[self.feature_cols]
+        
+        # ИСПРАВЛЕНИЕ: Надёжная конвертация в числовые типы
+        feature_data = feature_data.copy()
+        
+        # Применяем pd.to_numeric ко всем колонкам для надёжности
+        for col in feature_data.columns:
+            try:
+                # Сначала проверяем тип
+                if pd.api.types.is_object_dtype(feature_data[col]) or pd.api.types.is_categorical_dtype(feature_data[col]):
+                    if pd.api.types.is_categorical_dtype(feature_data[col]):
+                        # Категориальные переменные конвертируем в коды
+                        feature_data[col] = feature_data[col].cat.codes.astype(np.float32)
+                    else:
+                        # Object типы конвертируем через pd.to_numeric
+                        feature_data[col] = pd.to_numeric(feature_data[col], errors='coerce').fillna(0.0).astype(np.float32)
+                else:
+                    # Уже числовые типы просто приводим к float32
+                    feature_data[col] = feature_data[col].astype(np.float32)
+            except Exception as e:
+                # Если что-то пошло не так, заполняем нулями
+                feature_data[col] = np.zeros(len(feature_data), dtype=np.float32)
+        
+        # Получаем массив и финальная очистка от inf/nan
+        feature_values = feature_data.values
+        feature_values = np.nan_to_num(feature_values, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        X = torch.FloatTensor(feature_values)
         
         # Обработка целевых переменных
         if len(self.target_cols) > 0:
             # Берем целевые значения из ПОСЛЕДНЕЙ строки контекста
             # Это значения future_return_X которые уже содержат будущую доходность
-            y_values = context_data.iloc[-1][self.target_cols].values
+            y_data = context_data.iloc[-1][self.target_cols]
+            
+            # Конвертируем категориальные переменные в числовые
+            y_values = []
+            for col in self.target_cols:
+                value = y_data[col]
+                
+                # Обработка категориальной переменной best_direction
+                if col == 'best_direction':
+                    if pd.api.types.is_categorical_dtype(value) or isinstance(value, str):
+                        # Конвертируем в числовой код: LONG=0, SHORT=1, NEUTRAL=2
+                        if value == 'LONG':
+                            y_values.append(0)
+                        elif value == 'SHORT':
+                            y_values.append(1)
+                        elif value == 'NEUTRAL':
+                            y_values.append(2)
+                        else:
+                            y_values.append(2)  # fallback к NEUTRAL
+                    else:
+                        y_values.append(float(value))
+                else:
+                    # Обычные числовые переменные
+                    y_values.append(float(value))
+            
+            y_values = np.array(y_values, dtype=np.float32)
             
             # Если модель ожидает несколько временных шагов, дублируем значение
             if self.target_window > 1:
@@ -145,56 +201,98 @@ class TradingDataset(TimeSeriesDataset):
                  include_price_data: bool = True,
                  **kwargs):
         
-        # КРИТИЧНОЕ ИСПРАВЛЕНИЕ: Правильная работа с одной целевой переменной
-        if target_cols is None and config is not None:
-            # Получаем целевую переменную из конфига
+        # КРИТИЧНОЕ ИСПРАВЛЕНИЕ: Правильная работа с торговыми целевыми переменными
+        if target_cols is not None:
+            # Если target_cols переданы явно, используем их
+            trading_targets = target_cols
+            print(f"✅ Используется {len(trading_targets)} целевых переменных из параметров")
+        elif target_cols is None and config is not None:
+            # Получаем конфигурацию модели
             model_config = config.get('model', {})
-            target_variable = model_config.get('target_variable', 'future_return_4')
             task_type = model_config.get('task_type', 'regression')
             
-            # ИСПРАВЛЕНИЕ: Проверяем что целевая переменная существует в данных
-            if target_variable in data.columns:
-                trading_targets = [target_variable]
-                print(f"✅ Используется целевая переменная: {target_variable} (тип: {task_type})")
-            else:
-                # Fallback к доступным целевым переменным
-                available_targets = [col for col in data.columns 
-                                   if col.startswith(('target_', 'future_return_'))]
+            if task_type == 'trading':
+                # Для торговой модели используем специальные целевые переменные
+                trading_target_variables = model_config.get('target_variables', [])
                 
-                if available_targets:
-                    # Приоритет: future_return_4 > future_return_3 > future_return_2 > future_return_1
-                    preferred_targets = ['future_return_4', 'future_return_3', 'future_return_2', 'future_return_1']
-                    trading_targets = None
-                    for pref_target in preferred_targets:
-                        if pref_target in available_targets:
-                            trading_targets = [pref_target]
-                            break
+                if trading_target_variables:
+                    # Проверяем какие целевые переменные есть в данных
+                    available_trading_targets = [var for var in trading_target_variables if var in data.columns]
                     
-                    if trading_targets is None:
-                        trading_targets = [available_targets[0]]  # Берем первую доступную
-                    
-                    print(f"⚠️  Целевая переменная {target_variable} не найдена. Используется: {trading_targets[0]}")
+                    if available_trading_targets:
+                        trading_targets = available_trading_targets
+                        print(f"✅ Используется торговая модель с {len(trading_targets)} целевыми переменными")
+                        print(f"   Доступные цели: {trading_targets}")
+                    else:
+                        print("❌ Торговые целевые переменные из конфига не найдены в данных!")
+                        # Fallback к автоматическому поиску торговых целей
+                        auto_trading_targets = [col for col in data.columns 
+                                              if col.startswith(('long_tp', 'short_tp', 'long_sl', 'short_sl', 'best_direction'))]
+                        
+                        if auto_trading_targets:
+                            trading_targets = auto_trading_targets[:11]  # Ограничиваем основными
+                            print(f"🔧 Автоматически найдено {len(trading_targets)} торговых целей")
+                        else:
+                            raise ValueError("❌ Торговые целевые переменные не найдены!")
                 else:
-                    # КРИТИЧНОЕ ИСПРАВЛЕНИЕ: Создаем целевую переменную если её нет
-                    print("❌ Целевые переменные не найдены в данных! Создаем future_return_4...")
+                    # Автоматический поиск торговых целевых переменных
+                    auto_trading_targets = [col for col in data.columns 
+                                          if col.startswith(('long_tp', 'short_tp', 'long_sl', 'short_sl', 'best_direction'))]
                     
-                    # Создаем целевую переменную для каждого символа
-                    processed_dfs = []
-                    for symbol in data['symbol'].unique():
-                        symbol_data = data[data['symbol'] == symbol].copy().sort_values('datetime')
+                    if auto_trading_targets:
+                        # Приоритетные торговые цели
+                        priority_targets = [
+                            'long_tp1_reached', 'long_tp2_reached', 'long_tp3_reached', 'long_sl_reached',
+                            'short_tp1_reached', 'short_tp2_reached', 'short_tp3_reached', 'short_sl_reached',
+                            'best_direction'
+                        ]
+                        trading_targets = [t for t in priority_targets if t in data.columns]
                         
-                        # Создаем future_return_4
-                        symbol_data['future_close_4'] = symbol_data['close'].shift(-4)
-                        symbol_data['future_return_4'] = (
-                            (symbol_data['future_close_4'] / symbol_data['close'] - 1) * 100
-                        )
+                        if len(trading_targets) < 5:  # Минимум для торговой модели
+                            trading_targets = auto_trading_targets[:11]  # Берем первые 11
                         
-                        processed_dfs.append(symbol_data)
+                        print(f"🔧 Автоматически выбрано {len(trading_targets)} торговых целей")
+                    else:
+                        raise ValueError("❌ Торговые целевые переменные не найдены в данных!")
+            else:
+                # Для регрессии/классификации используем стандартную логику
+                target_variable = model_config.get('target_variable', 'future_return_4')
+                
+                # ИСПРАВЛЕНИЕ: Проверяем что целевая переменная существует в данных
+                if target_variable in data.columns:
+                    trading_targets = [target_variable]
+                    print(f"✅ Используется целевая переменная: {target_variable} (тип: {task_type})")
+                else:
+                    # Fallback к доступным целевым переменным
+                    available_targets = [col for col in data.columns 
+                                   if col.startswith(('target_', 'future_return_'))]
                     
-                    # Обновляем исходные данные
-                    data = pd.concat(processed_dfs, ignore_index=True)
-                    trading_targets = ['future_return_4']
-                    print(f"✅ Создана целевая переменная: future_return_4")
+                    if available_targets:
+                        # Приоритет: future_return_4 > future_return_3 > future_return_2 > future_return_1
+                        preferred_targets = ['future_return_4', 'future_return_3', 'future_return_2', 'future_return_1']
+                        trading_targets = None
+                        for pref_target in preferred_targets:
+                            if pref_target in available_targets:
+                                trading_targets = [pref_target]
+                                break
+                        
+                        if trading_targets is None:
+                            trading_targets = [available_targets[0]]  # Берем первую доступную
+                        
+                        print(f"⚠️  Целевая переменная {target_variable} не найдена. Используется: {trading_targets[0]}")
+                    else:
+                        # КРИТИЧНОЕ ИСПРАВЛЕНИЕ: НЕ создаем переменные заново при использовании кэша!
+                        # Проверяем есть ли ANY торговые целевые переменные в кэшированных данных
+                        any_trading_targets = [col for col in data.columns 
+                                             if any(pattern in col for pattern in ['_hit', '_reached', '_tp', '_sl', 'best_direction', 'future_return'])]
+                        
+                        if any_trading_targets:
+                            # Используем существующие торговые переменные из кэша
+                            trading_targets = any_trading_targets[:36]  # Ограничиваем до 36 для модели
+                            print(f"✅ Найдено {len(trading_targets)} торговых переменных в кэшированных данных")
+                            print(f"   Используем существующие цели из кэша: {trading_targets[:5]}...")
+                        else:
+                            raise ValueError("❌ Кэшированные данные не содержат торговых целевых переменных! Пересоздайте кэш: python prepare_trading_data.py --force-recreate")
                     
         elif target_cols is None:
             # Автоматически находим целевые переменные (старое поведение)
@@ -216,27 +314,32 @@ class TradingDataset(TimeSeriesDataset):
         
         # ИСПРАВЛЕНИЕ: Проверка размерности целей с конфигурацией модели
         if config is not None:
-            expected_output_size = config.get('model', {}).get('output_size', 1)
-            if len(trading_targets) != expected_output_size:
+            model_config = config.get('model', {})
+            task_type = model_config.get('task_type', 'regression')
+            expected_output_size = model_config.get('output_size', 1)
+            
+            # Для торговой модели НЕ обрезаем целевые переменные
+            if task_type != 'trading' and len(trading_targets) != expected_output_size:
                 print(f"⚠️  Несоответствие размерностей: target_cols={len(trading_targets)}, output_size={expected_output_size}")
                 
                 # Автоматическое исправление: берем только нужное количество целей
                 if len(trading_targets) > expected_output_size:
                     trading_targets = trading_targets[:expected_output_size]
                     print(f"🔧 Исправлено: используются первые {expected_output_size} целей: {trading_targets}")
+            elif task_type == 'trading':
+                print(f"✅ Торговая модель: используется {len(trading_targets)} целевых переменных")
         
-        # ИСПРАВЛЕНИЕ: Обновляем data если были внесены изменения
-        if 'future_return_4' in trading_targets and 'future_return_4' not in data.columns:
-            print("⚠️  future_return_4 не найдена, создаем на лету...")
-            processed_dfs = []
-            for symbol in data['symbol'].unique():
-                symbol_data = data[data['symbol'] == symbol].copy().sort_values('datetime')
-                symbol_data['future_close_4'] = symbol_data['close'].shift(-4)
-                symbol_data['future_return_4'] = (
-                    (symbol_data['future_close_4'] / symbol_data['close'] - 1) * 100
-                )
-                processed_dfs.append(symbol_data)
-            data = pd.concat(processed_dfs, ignore_index=True)
+        # ВАЖНО: НЕ пересоздаем данные если они уже есть в кэше!
+        # Проверяем все ли нужные целевые переменные присутствуют
+        missing_targets = [target for target in trading_targets if target not in data.columns]
+        
+        if missing_targets:
+            print(f"⚠️  Отсутствуют целевые переменные: {missing_targets}")
+            print("❌ Пересоздайте кэш с правильными целевыми переменными:")
+            print("   python prepare_trading_data.py --force-recreate")
+            raise ValueError(f"Отсутствуют целевые переменные в кэшированных данных: {missing_targets}")
+        else:
+            print(f"✅ Все {len(trading_targets)} целевых переменных найдены в кэшированных данных")
         
         # Добавляем target_window если он передан в kwargs
         if 'target_window' in kwargs:
@@ -423,7 +526,8 @@ def create_data_loaders(train_data: pd.DataFrame,
                        val_data: pd.DataFrame,
                        test_data: pd.DataFrame,
                        config: Dict,
-                       feature_cols: List[str] = None) -> Tuple[DataLoader, DataLoader, DataLoader]:
+                       feature_cols: List[str] = None,
+                       target_cols: List[str] = None) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Создание DataLoader'ов для обучения"""
     
     logger = get_logger("DataLoaders")
@@ -435,38 +539,62 @@ def create_data_loaders(train_data: pd.DataFrame,
     persistent_workers = config['performance'].get('persistent_workers', True) if num_workers > 0 else False
     prefetch_factor = config['performance'].get('prefetch_factor', 2)
     
-    logger.info("Создание датасетов...")
+    logger.info("📦 Создание унифицированных датасетов...")
     
-    # Создание датасетов
-    train_dataset = TradingDataset(
-        data=train_data,
-        config=config,
-        context_window=context_window,
-        prediction_window=pred_window,
-        feature_cols=feature_cols,
-        stride=1  # Для обучения используем все возможные окна
-    )
+    # Проверка валидности данных
+    if len(train_data) == 0 or len(val_data) == 0 or len(test_data) == 0:
+        raise ValueError("❌ Один из датасетов пуст!")
     
-    val_dataset = TradingDataset(
-        data=val_data,
-        config=config,
-        context_window=context_window,
-        prediction_window=pred_window,
-        feature_cols=feature_cols,
-        stride=4  # Для валидации можем использовать больший stride
-    )
+    # Логирование структуры данных
+    logger.info(f"📊 Исходные данные:")
+    logger.info(f"   - Train: {len(train_data):,} записей, {len(train_data.columns)} колонок")
+    logger.info(f"   - Val: {len(val_data):,} записей, {len(val_data.columns)} колонок") 
+    logger.info(f"   - Test: {len(test_data):,} записей, {len(test_data.columns)} колонок")
     
-    test_dataset = TradingDataset(
-        data=test_data,
-        config=config,
-        context_window=context_window,
-        prediction_window=pred_window,
-        feature_cols=feature_cols,
-        stride=4
-    )
+    if feature_cols:
+        logger.info(f"   - Признаков: {len(feature_cols)}")
+    if target_cols:
+        logger.info(f"   - Целевых переменных: {len(target_cols)}")
     
-    logger.info(f"Размеры датасетов - Train: {len(train_dataset)}, "
-               f"Val: {len(val_dataset)}, Test: {len(test_dataset)}")
+    # Создание датасетов с проверкой ошибок
+    try:
+        train_dataset = TradingDataset(
+            data=train_data,
+            config=config,
+            context_window=context_window,
+            prediction_window=pred_window,
+            feature_cols=feature_cols,
+            target_cols=target_cols,
+            stride=1  # Для обучения используем все возможные окна
+        )
+        
+        val_dataset = TradingDataset(
+            data=val_data,
+            config=config,
+            context_window=context_window,
+            prediction_window=pred_window,
+            feature_cols=feature_cols,
+            target_cols=target_cols,
+            stride=4  # Для валидации можем использовать больший stride
+        )
+        
+        test_dataset = TradingDataset(
+            data=test_data,
+            config=config,
+            context_window=context_window,
+            prediction_window=pred_window,
+            feature_cols=feature_cols,
+            target_cols=target_cols,
+            stride=4
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка при создании датасетов: {e}")
+        raise
+    
+    logger.info(f"Размеры датасетов после создания окон:")
+    logger.info(f"   - Train: {len(train_dataset):,} окон (из {len(train_data):,} записей)")
+    logger.info(f"   - Val: {len(val_dataset):,} окон (из {len(val_data):,} записей, stride={val_dataset.stride})")
+    logger.info(f"   - Test: {len(test_dataset):,} окон (из {len(test_data):,} записей, stride={test_dataset.stride})")
     
     # Создание DataLoader'ов
     train_loader = DataLoader(

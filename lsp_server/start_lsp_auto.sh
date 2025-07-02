@@ -32,7 +32,7 @@ else
 fi
 
 # Запускаем LSP сервер в фоновом режиме
-nohup python enhanced_lsp_server.py --stdio > lsp_service.log 2>&1 &
+nohup python3 enhanced_lsp_server.py --stdio > lsp_service.log 2>&1 &
 LSP_PID=$!
 
 # Проверяем, что сервер запустился

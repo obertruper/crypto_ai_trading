@@ -19,9 +19,9 @@ bybit:
     base: 0.0005
     market_impact_threshold: 0.01
 data:
-  end_date: '2025-06-16'
+  end_date: '2025-06-29'
   interval_minutes: 15
-  start_date: '2022-06-08'
+  start_date: '2020-03-25'
   symbols:
   - BTCUSDT
   - ETHUSDT
@@ -90,6 +90,8 @@ database:
   port: 5555
   table: raw_market_data
   user: ruslan
+  # Альтернативное подключение через Unix socket (если TCP не работает)
+  # unix_socket: /var/run/postgresql
 ensemble:
   enabled: true
   models_count: 5
@@ -148,40 +150,94 @@ logging:
     entity: your-entity
     project: crypto-ai-trading
 loss:
-  name: mse
+  name: unified_trading  # Унифицированная loss для 36 целевых переменных
+  future_return_weight: 1.0  # Вес для future_return_1-4
   params:
     reduction: mean
+    # Веса для различных компонентов
+    direction_weight: 1.0
+    tp_weight: 0.8
+    sl_weight: 1.2
+    entry_time_weight: 0.5
 model:
   activation: gelu
   batch_norm: true
-  batch_size: 128  # Увеличен для лучшей стабильности
-  context_window: 96  # Увеличен для лучшего контекста
+  batch_size: 1024  # МАКСИМАЛЬНО УВЕЛИЧЕН для RTX 5090
+  context_window: 168  # 42 часа истории (168 * 15 минут)
   d_ff: 512  # Увеличен размер feedforward
   d_model: 256  # Установлено для соответствия fusion layer
-  dropout: 0.2  # Уменьшен dropout
+  dropout: 0.15  # УМЕНЬШЕН для лучшего обучения в начале
   e_layers: 3  # Оптимальное количество слоев
-  early_stopping_patience: 20  # Больше терпения
-  epochs: 100  # Больше эпох с early stopping
-  gradient_clip: 0.5  # Более агрессивный clipping
+  early_stopping_patience: 25  # УВЕЛИЧЕНО для терпения
+  epochs: 100  # Максимум эпох для полного обучения
+  gradient_clip: 1.0  # УВЕЛИЧЕН для стабильности
   individual: false
-  input_size: 100
-  learning_rate: 0.00001  # Еще больше уменьшен для предотвращения NaN
-  min_delta: 0.0001  # Более чувствительный порог
+  input_size: 159  # Автоматически определено из данных
+  learning_rate: 0.0001  # УМЕНЬШЕН для стабильности
+  min_delta: 0.0001  # МЕНЕЕ чувствительный порог
   n_heads: 4
-  name: PatchTST
-  output_size: 1
-  overfitting_threshold: 0.2  # Более строгий контроль
+  name: UnifiedPatchTST  # ИЗМЕНЕНО на унифицированную модель
+  output_size: 36  # ИЗМЕНЕНО для соответствия целевым переменным
+  overfitting_threshold: 0.3  # МЕНЕЕ строгий контроль в начале
   patch_len: 16  # Увеличен размер патча
-  target_variable: future_return_4  # Используем future_return_4 (доходность через 1 час для 15-мин данных)
-  task_type: regression
+  use_amp: true      # Mixed Precision для RTX 5090
+  amp_dtype: float16  # FP16 для совместимости с sm_120
+  compile_model: true  # torch.compile для ускорения (требует PyTorch 2.0+)
+  use_tf32: true  # TensorFloat-32 для ускорения
+  # Целевые переменные для торговой модели (36 переменных)
+  target_variables:
+    # Базовые возвраты
+    - future_return_1
+    - future_return_2
+    - future_return_3
+    - future_return_4
+    # Long позиции
+    - long_tp1_hit
+    - long_tp1_reached
+    - long_tp1_time
+    - long_tp2_hit
+    - long_tp2_reached
+    - long_tp2_time
+    - long_tp3_hit
+    - long_tp3_reached
+    - long_tp3_time
+    - long_sl_hit
+    - long_sl_reached
+    - long_sl_time
+    - long_optimal_entry_time
+    - long_optimal_entry_price
+    - long_optimal_entry_improvement
+    # Short позиции
+    - short_tp1_hit
+    - short_tp1_reached
+    - short_tp1_time
+    - short_tp2_hit
+    - short_tp2_reached
+    - short_tp2_time
+    - short_tp3_hit
+    - short_tp3_reached
+    - short_tp3_time
+    - short_sl_hit
+    - short_sl_reached
+    - short_sl_time
+    - short_optimal_entry_time
+    - short_optimal_entry_price
+    - short_optimal_entry_improvement
+    # Направление и целевая переменная
+    - best_direction  # LONG/SHORT/NEUTRAL
+    - target_return_1h
+  task_type: trading  # Специальный режим для торговли
   target_window: 1  # Предсказываем одно значение
   pred_len: 1  # Предсказываем одно значение
   stride: 8  # Увеличен шаг для меньшего перекрытия
   warmup_steps: 500  # Больше warmup шагов
   # Дополнительные параметры против переобучения
-  label_smoothing: 0.1
-  mixup_alpha: 0.2
-  weight_noise: 0.01
+  label_smoothing: 0.0  # ОТКЛЮЧЕНО в начале обучения
+  mixup_alpha: 0.0      # ОТКЛЮЧЕНО
+  weight_noise: 0.0     # ОТКЛЮЧЕНО
+  # Оптимизации для RTX 5090
+  compile_model: false  # torch.compile не работает с sm_120
+  use_tf32: true  # TensorFloat-32 для ускорения
   # Параметры для улучшенной версии PatchTST
   use_improvements: false  # Временно отключено до исправления размерностей
   feature_attention: true  # Использовать FeatureAttention
@@ -199,12 +255,13 @@ performance:
   cache_dir: cache/
   cache_features: true
   data_parallel: true
-  device: cuda
-  mixed_precision: false
-  num_workers: 2
-  persistent_workers: false
+  device: cuda  # RTX 5090 с 31.4 GB памяти
+  mixed_precision: true  # Включено для RTX 5090
+  num_workers: 0  # ИСПРАВЛЕНО: отключаем мультипроцессинг для GPU обучения
+  persistent_workers: false  # ИСПРАВЛЕНО: отключаем при num_workers=0
   pin_memory: true
-  prefetch_factor: 1
+  prefetch_factor: 4  # Увеличено в 2 раза для предзагрузки
+  gradient_accumulation_steps: 1  # Эффективный batch_size = 1024
 remote_server:
   direct_connection:
     host: ssh1.vast.ai
@@ -266,13 +323,16 @@ risk_management:
     major_risk_multiplier: 1.0
     meme_coin_risk_multiplier: 0.5
 scheduler:
-  name: ReduceLROnPlateau
+  name: OneCycleLR  # ИЗМЕНЕНО для динамического LR
   params:
-    factor: 0.5
-    min_lr: 1.0e-06
-    mode: min
-    patience: 5
-    threshold: 0.0001
+    max_lr: 0.001     # УМЕНЬШЕН максимальный LR для стабильности
+    pct_start: 0.3   # 30% времени на разгон
+    anneal_strategy: cos  # Косинусное затухание
+    cycle_momentum: true
+    base_momentum: 0.85
+    max_momentum: 0.95
+    div_factor: 25      # Начальный LR = max_lr / 25 = 0.00004
+    final_div_factor: 10000  # Финальный LR = max_lr / 10000 = 0.0000001
 trading:
   max_daily_trades: 15
   max_positions: 5

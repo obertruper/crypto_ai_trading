@@ -16,6 +16,16 @@ warnings.filterwarnings('ignore')
 
 from utils.logger import get_logger
 
+# Оптимизация GPU если доступен
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.enabled = True
+    # Установка float32 matmul precision для ускорения на новых GPU
+    torch.set_float32_matmul_precision('high')
+    # Дополнительные оптимизации для Ampere+ архитектуры (RTX 5090)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
 # Версия системы
 __version__ = "2.0.0"
 
@@ -23,6 +33,111 @@ def load_config(config_path: str) -> dict:
     """Загрузка конфигурации"""
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
+
+def load_cached_data_if_exists(logger) -> tuple:
+    """Централизованная загрузка кэшированных данных
+    
+    Returns:
+        tuple: (train_data, val_data, test_data, feature_cols, target_cols) или (None, None, None, None, None)
+    """
+    logger.info("🔍 Проверка наличия кэшированных данных...")
+    
+    processed_dir = Path("data/processed")
+    train_file = processed_dir / "train_data.parquet"
+    val_file = processed_dir / "val_data.parquet"
+    test_file = processed_dir / "test_data.parquet"
+    
+    if all(f.exists() for f in [train_file, val_file, test_file]):
+        logger.info("✅ Найдены кэшированные данные, загружаем...")
+        
+        train_data = pd.read_parquet(train_file)
+        val_data = pd.read_parquet(val_file)
+        test_data = pd.read_parquet(test_file)
+        
+        logger.info(f"📊 Размеры кэшированных данных:")
+        logger.info(f"   - Train: {len(train_data):,} записей")
+        logger.info(f"   - Val: {len(val_data):,} записей")
+        logger.info(f"   - Test: {len(test_data):,} записей")
+        
+        # Определяем признаки и целевые переменные из кэшированных данных
+        from data.constants import (
+            get_feature_columns, get_target_columns, 
+            validate_data_structure, TRADING_TARGET_VARIABLES
+        )
+        
+        try:
+            data_info = validate_data_structure(train_data)
+            feature_cols = data_info['feature_cols']
+            target_cols = data_info['target_cols']
+            
+            logger.info(f"📈 Структура кэшированных данных:")
+            logger.info(f"   - Всего колонок: {len(train_data.columns)}")
+            logger.info(f"   - Признаков для модели: {len(feature_cols)}")
+            logger.info(f"   - Целевых переменных: {len(target_cols)}")
+            logger.info(f"   - Служебных колонок: {len(train_data.columns) - len(feature_cols) - len(target_cols)}")
+            
+            return train_data, val_data, test_data, feature_cols, target_cols
+            
+        except ValueError as e:
+            logger.error(f"❌ Ошибка структуры кэшированных данных: {e}")
+            return None, None, None, None, None
+    else:
+        logger.info("❌ Кэшированные данные не найдены")
+        missing_files = [f.name for f in [train_file, val_file, test_file] if not f.exists()]
+        logger.info(f"   Отсутствуют файлы: {missing_files}")
+        return None, None, None, None, None
+
+def create_unified_data_loaders(train_data, val_data, test_data, feature_cols, target_cols, config, logger):
+    """Унифицированное создание DataLoader'ов для всех режимов
+    
+    Args:
+        train_data, val_data, test_data: DataFrame'ы с данными
+        feature_cols, target_cols: списки колонок
+        config: конфигурация
+        logger: логгер
+        
+    Returns:
+        tuple: (train_loader, val_loader, test_loader)
+    """
+    logger.info("🏗️ Создание унифицированных DataLoader'ов...")
+    
+    from data.dataset import create_data_loaders
+    
+    # Обновляем конфигурацию чтобы соответствовать реальным данным
+    config_updated = config.copy()
+    config_updated['model']['input_features'] = len(feature_cols)
+    config_updated['model']['n_features'] = len(feature_cols)
+    
+    # Проверяем совместимость данных с конфигурацией модели
+    task_type = config['model'].get('task_type', 'regression')
+    
+    if task_type == 'trading':
+        # Используем ВСЕ доступные торговые целевые переменные из кэша
+        config_updated['model']['target_variables'] = target_cols
+        logger.info(f"✅ Торговая модель: используем все {len(target_cols)} целевых переменных")
+        logger.info(f"   Первые 5 переменных: {target_cols[:5]}")
+    else:
+        # Для регрессии выбираем основную целевую переменную
+        main_target = [col for col in target_cols if col.startswith('future_return_')]
+        if main_target:
+            config_updated['model']['target_variable'] = main_target[0]
+            logger.info(f"✅ Регрессия: используем целевую переменную {main_target[0]}")
+        else:
+            logger.error("❌ Не найдена целевая переменная для регрессии!")
+            raise ValueError("Нет подходящей целевой переменной для регрессии")
+    
+    # Создание DataLoader'ов с правильными параметрами
+    train_loader, val_loader, test_loader = create_data_loaders(
+        train_data=train_data,
+        val_data=val_data, 
+        test_data=test_data,
+        config=config_updated,
+        feature_cols=feature_cols,
+        target_cols=target_cols
+    )
+    
+    logger.info("✅ DataLoader'ы созданы успешно")
+    return train_loader, val_loader, test_loader, config_updated
 
 def prepare_data(config: dict, logger):
     """Подготовка данных для обучения с защитой от data leakage"""
@@ -73,12 +188,16 @@ def prepare_data(config: dict, logger):
     
     logger.info("🏗️ Создание datasets...")
     
-    # Создание DataLoader'ов
-    train_loader, val_loader, test_loader = create_data_loaders(
-        train_data=train_data,
-        val_data=val_data, 
-        test_data=test_data,
-        config=config
+    # Создание DataLoader'ов через унифицированную систему
+    from data.constants import get_feature_columns, get_target_columns, validate_data_structure
+    
+    # Определяем структуру данных
+    data_info = validate_data_structure(train_data)
+    feature_cols = data_info['feature_cols']
+    target_cols = data_info['target_cols']
+    
+    train_loader, val_loader, test_loader, _ = create_unified_data_loaders(
+        train_data, val_data, test_data, feature_cols, target_cols, config, logger
     )
     
     logger.info(f"📊 Размеры datasets:")
@@ -108,30 +227,74 @@ def train_model(config: dict, train_loader, val_loader, logger):
     
     logger.info(f"📊 Входные признаки: {n_features}, Целевые переменные: {n_targets}")
     
-    # ИСПРАВЛЕНИЕ: Используем правильную модель
-    from models.patchtst import PatchTSTForPrediction
+    # Проверяем соответствие с конфигурацией
+    config_input_size = config['model'].get('input_size', 100)
+    config_output_size = config['model'].get('output_size', 1)
+    task_type = config['model'].get('task_type', 'regression')
     
-    model = PatchTSTForPrediction(
-        c_in=n_features,
-        c_out=n_targets,
-        context_window=config['model']['context_window'],
-        target_window=config['model']['pred_len'],
-        patch_len=config['model']['patch_len'],
-        stride=config['model']['stride'],
-        n_layers=config['model']['e_layers'],
-        d_model=config['model']['d_model'],
-        n_heads=config['model']['n_heads'],
-        d_ff=config['model']['d_ff'],
-        dropout=config['model']['dropout'],
-        # Параметры улучшений
-        use_improvements=config['model'].get('use_improvements', False),
-        feature_attention=config['model'].get('feature_attention', False),
-        multi_scale_patches=config['model'].get('multi_scale_patches', False)
-    )
+    if n_features != config_input_size:
+        logger.warning(f"⚠️ Размерность признаков не совпадает: данные={n_features}, конфиг={config_input_size}")
+        logger.info(f"🔧 Автоматически обновляем input_size в конфигурации")
+        config['model']['input_size'] = n_features
     
-    # Создание трейнера
+    if task_type == 'trading':
+        # Для торговой модели с большим количеством целей используем базовую архитектуру
+        if config['model']['name'] == 'UnifiedPatchTST':  # Используем унифицированную модель
+            logger.info(f"📊 Торговая модель: {n_targets} целевых переменных - используем гибкую архитектуру")
+            config['model']['output_size'] = n_targets
+        else:
+            logger.info(f"📊 Торговая модель: используется PatchTSTForTrading с несколькими выходами")
+    else:
+        if n_targets != config_output_size:
+            logger.warning(f"⚠️ Размерность целей не совпадает: данные={n_targets}, конфиг={config_output_size}")
+            logger.info(f"🔧 Автоматически обновляем output_size в конфигурации")
+            config['model']['output_size'] = n_targets
+    
+    # Используем фабрику для создания правильной модели
+    from models.patchtst import create_patchtst_model
+    from models.patchtst_unified import create_unified_model, UnifiedPatchTSTForTrading
+    
+    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Всегда используем UnifiedPatchTST для 36 целевых переменных
+    if task_type == 'trading' and n_targets > 10:
+        logger.info(f"🎯 Обнаружено {n_targets} целевых переменных - используем UnifiedPatchTST")
+        config['model']['name'] = 'UnifiedPatchTST'
+        config['model']['output_size'] = n_targets
+        model = create_unified_model(config)
+        # ИСПРАВЛЕНО: torch.compile создает CPU worker'ы, отключаем для прямого GPU использования
+        # model = torch.compile(model, backend="inductor")
+        logger.info("✅ UnifiedPatchTST создан с 36 выходами для торговой модели")
+        logger.info("⚠️ torch.compile отключен - прямое использование GPU")
+    elif config['model']['name'] == 'UnifiedPatchTST':
+        model = create_unified_model(config)
+        # ИСПРАВЛЕНО: torch.compile создает CPU worker'ы, отключаем
+        # model = torch.compile(model, backend="inductor")
+        logger.info("📊 Используется UnifiedPatchTST с 36 выходами")
+        logger.info("⚠️ torch.compile отключен - прямое использование GPU")
+    else:
+        model = create_patchtst_model(config)
+        # Логируем тип модели
+        if hasattr(model, 'long_model'):
+            logger.info("✅ Используется PatchTSTForTrading с поддержкой LONG/SHORT")
+        else:
+            logger.info("📊 Используется базовая PatchTSTForPrediction")
+    
+    # ВАЖНО: Явно перемещаем модель на GPU перед созданием трейнера
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        model = model.to(device)
+        logger.info(f"🔥 Модель перемещена на GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"💾 GPU память доступна: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    else:
+        device = torch.device('cpu')
+        logger.warning("⚠️ GPU не доступен, используется CPU")
+    
+    # Создание трейнера с явным указанием устройства
     from training.trainer import Trainer
-    trainer = Trainer(model, config)
+    trainer = Trainer(model, config, device=device)
+    
+    # Проверка размещения модели
+    logger.info(f"✅ Модель на устройстве: {next(model.parameters()).device}")
+    logger.info(f"✅ Трейнер использует: {trainer.device}")
     
     # DataLoader'ы уже созданы, используем их напрямую
     
@@ -300,16 +463,35 @@ def main():
         return
     
     try:
-        if args.mode in ['data', 'full']:
-            train_loader, val_loader, test_loader = prepare_data(config, logger)
+        # Централизованная загрузка данных для всех режимов
+        train_data, val_data, test_data, feature_cols, target_cols = None, None, None, None, None
+        train_loader, val_loader, test_loader = None, None, None
+        config_updated = config.copy()
+        
+        if args.mode in ['data', 'train', 'full']:
+            # Сначала проверяем наличие кэшированных данных
+            train_data, val_data, test_data, feature_cols, target_cols = load_cached_data_if_exists(logger)
+            
+            if train_data is not None:
+                # Используем кэшированные данные
+                logger.info("🎯 Используем кэшированные данные для всех режимов")
+                train_loader, val_loader, test_loader, config_updated = create_unified_data_loaders(
+                    train_data, val_data, test_data, feature_cols, target_cols, config, logger
+                )
+            elif args.mode in ['data', 'full']:
+                # Создаем новые данные только если их нет и это режим data/full
+                logger.info("🔄 Кэшированные данные не найдены, создаем новые...")
+                train_loader, val_loader, test_loader = prepare_data(config, logger)
+                config_updated = config  # используем оригинальную конфигурацию
+            else:
+                # Режим train без кэшированных данных
+                logger.error("❌ Режим train требует наличия кэшированных данных!")
+                logger.error("Запустите сначала: python prepare_trading_data.py")
+                return
         
         if args.mode in ['train', 'full']:
-            if args.mode == 'train':
-                # Загрузка сохраненных данных
-                logger.error("Режим 'train' требует предварительного запуска 'data'")
-                return
-            
-            model, model_path, train_loader = train_model(config, train_loader, val_loader, logger)
+            # Обучение модели с унифицированной конфигурацией
+            model, model_path, train_loader = train_model(config_updated, train_loader, val_loader, logger)
         
         if args.mode in ['backtest', 'full']:
             if args.mode == 'backtest':

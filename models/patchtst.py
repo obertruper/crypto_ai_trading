@@ -227,7 +227,7 @@ class FlattenHead(nn.Module):
 
 
 class PatchTSTForPrediction(nn.Module):
-    """PatchTST модель для предсказания целевых переменных с защитой от переобучения"""
+    """PatchTST модель для предсказания целевых переменных с поддержкой LONG/SHORT"""
     
     def __init__(self,
                  c_in: int,  # количество входных признаков
@@ -243,6 +243,7 @@ class PatchTSTForPrediction(nn.Module):
                  dropout: float = 0.0,
                  layer_dropout: float = 0.0,  # Stochastic depth
                  weight_noise: float = 0.0,  # Noise regularization
+                 task_type: str = 'regression',  # 'regression' или 'classification'
                  **kwargs):
         super().__init__()
         
@@ -255,6 +256,7 @@ class PatchTSTForPrediction(nn.Module):
         self.d_model = d_model
         self.layer_dropout = layer_dropout
         self.weight_noise = weight_noise
+        self.task_type = task_type
         
         # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Фиксированное вычисление num_patches с валидацией
         self.num_patches = self._calculate_num_patches(context_window, patch_len, stride)
@@ -313,15 +315,28 @@ class PatchTSTForPrediction(nn.Module):
             norm=nn.LayerNorm(d_model)
         )
         
-        # Output projection
+        # Output projection с поддержкой различных задач
         self.head_nf = d_model * self.num_patches
-        self.output_projection = nn.Sequential(
-            nn.Flatten(start_dim=-2),
-            nn.Linear(self.head_nf, d_ff),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_ff, c_out * target_window)
-        )
+        
+        if task_type == 'regression':
+            # Для регрессии предсказываем continuous values
+            self.output_projection = nn.Sequential(
+                nn.Flatten(start_dim=-2),
+                nn.Linear(self.head_nf, d_ff),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_ff, c_out * target_window)
+            )
+        else:
+            # Для классификации предсказываем вероятности
+            self.output_projection = nn.Sequential(
+                nn.Flatten(start_dim=-2),
+                nn.Linear(self.head_nf, d_ff),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_ff, c_out * target_window),
+                nn.Sigmoid()  # Вероятности в диапазоне [0, 1]
+            )
         
         # Инициализация весов
         self._init_weights()
@@ -405,6 +420,80 @@ class PatchTSTForPrediction(nn.Module):
                     nn.init.zeros_(module.bias)
 
 
+class PatchTSTForTrading(nn.Module):
+    """Обертка для PatchTST с поддержкой торговых сигналов LONG/SHORT"""
+    
+    def __init__(self, config: Dict):
+        super().__init__()
+        self.config = config
+        model_config = config.get('model', {})
+        
+        # Базовые параметры
+        self.n_features = model_config.get('input_size', 100)
+        self.context_window = model_config.get('context_window', 168)
+        
+        # Создаем отдельные модели для LONG и SHORT
+        base_params = {
+            'c_in': self.n_features,
+            'context_window': self.context_window,
+            'target_window': model_config.get('pred_len', 4),
+            'patch_len': model_config.get('patch_len', 16),
+            'stride': model_config.get('stride', 8),
+            'n_layers': model_config.get('e_layers', 3),
+            'd_model': model_config.get('d_model', 128),
+            'n_heads': model_config.get('n_heads', 8),
+            'd_ff': model_config.get('d_ff', 512),
+            'dropout': model_config.get('dropout', 0.1),
+            'task_type': 'classification',
+            'use_improvements': model_config.get('use_improvements', False),
+            'feature_attention': model_config.get('feature_attention', False),
+            'multi_scale_patches': model_config.get('multi_scale_patches', False)
+        }
+        
+        # Модель для LONG: вероятности TP1, TP2, TP3, SL, оптимальное время входа
+        self.long_model = PatchTSTForPrediction(
+            c_out=5,  # TP1, TP2, TP3, SL, optimal_entry_time
+            **base_params
+        )
+        
+        # Модель для SHORT: вероятности TP1, TP2, TP3, SL, оптимальное время входа  
+        self.short_model = PatchTSTForPrediction(
+            c_out=5,  # TP1, TP2, TP3, SL, optimal_entry_time
+            **base_params
+        )
+        
+        # Модель для определения направления (LONG/SHORT/NEUTRAL)
+        self.direction_model = PatchTSTForPrediction(
+            c_out=3,  # LONG, SHORT, NEUTRAL
+            **base_params
+        )
+        
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Прямой проход с предсказанием всех необходимых значений"""
+        
+        # Предсказание направления
+        direction_probs = self.direction_model(x)  # (B, 1, 3)
+        direction_probs = direction_probs.squeeze(1)  # (B, 3)
+        
+        # Предсказания для LONG
+        long_predictions = self.long_model(x)  # (B, 1, 5)
+        long_predictions = long_predictions.squeeze(1)  # (B, 5)
+        
+        # Предсказания для SHORT
+        short_predictions = self.short_model(x)  # (B, 1, 5)
+        short_predictions = short_predictions.squeeze(1)  # (B, 5)
+        
+        return {
+            'direction_probs': direction_probs,  # [long_prob, short_prob, neutral_prob]
+            'long_tp_probs': long_predictions[:, :3],  # Вероятности TP1, TP2, TP3 для LONG
+            'long_sl_prob': long_predictions[:, 3:4],  # Вероятность SL для LONG
+            'long_entry_time': long_predictions[:, 4:5],  # Оптимальное время входа LONG
+            'short_tp_probs': short_predictions[:, :3],  # Вероятности TP1, TP2, TP3 для SHORT
+            'short_sl_prob': short_predictions[:, 3:4],  # Вероятность SL для SHORT
+            'short_entry_time': short_predictions[:, 4:5],  # Оптимальное время входа SHORT
+        }
+
+
 def create_patchtst_model(config: Dict) -> PatchTSTForPrediction:
     """Создание модели из конфигурации с валидацией"""
     from utils.config_validator import ModelConfig
@@ -424,22 +513,31 @@ def create_patchtst_model(config: Dict) -> PatchTSTForPrediction:
     n_features = model_config.get('input_size', 100)
     n_targets = model_config.get('output_size', 1)  # количество целевых переменных
     
-    model = PatchTSTForPrediction(
-        c_in=n_features,
-        c_out=n_targets,
-        context_window=model_config.get('context_window', 168),
-        target_window=model_config.get('pred_len', 4),
-        patch_len=model_config.get('patch_len', 16),
-        stride=model_config.get('stride', 8),
-        n_layers=model_config.get('e_layers', 3),
-        d_model=model_config.get('d_model', 128),
-        n_heads=model_config.get('n_heads', 8),
-        d_ff=model_config.get('d_ff', 512),
-        dropout=model_config.get('dropout', 0.1),
-        # Параметры улучшений
-        use_improvements=model_config.get('use_improvements', False),
-        feature_attention=model_config.get('feature_attention', False),
-        multi_scale_patches=model_config.get('multi_scale_patches', False)
-    )
+    # Определяем тип задачи
+    task_type = model_config.get('task_type', 'regression')
+    
+    if task_type == 'trading':
+        # Создаем специализированную модель для торговли
+        model = PatchTSTForTrading(config)
+    else:
+        # Создаем базовую модель
+        model = PatchTSTForPrediction(
+            c_in=n_features,
+            c_out=n_targets,
+            context_window=model_config.get('context_window', 168),
+            target_window=model_config.get('pred_len', 4),
+            patch_len=model_config.get('patch_len', 16),
+            stride=model_config.get('stride', 8),
+            n_layers=model_config.get('e_layers', 3),
+            d_model=model_config.get('d_model', 128),
+            n_heads=model_config.get('n_heads', 8),
+            d_ff=model_config.get('d_ff', 512),
+            dropout=model_config.get('dropout', 0.1),
+            task_type=task_type,
+            # Параметры улучшений
+            use_improvements=model_config.get('use_improvements', False),
+            feature_attention=model_config.get('feature_attention', False),
+            multi_scale_patches=model_config.get('multi_scale_patches', False)
+        )
     
     return model
