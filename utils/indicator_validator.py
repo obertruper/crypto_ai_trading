@@ -205,14 +205,22 @@ class IndicatorValidator:
     
     def _check_normalization_signs(self, df: pd.DataFrame, results: Dict):
         """Проверка признаков нормализации в данных"""
-        
+
         # Ищем колонки с подозрительными статистиками
         suspicious_cols = []
-        
+
+        ignore_cols = {
+            'price_direction', 'volume_zscore', 'momentum_1h',
+            'trend_1h_strength', 'future_return_3', 'future_return_4',
+            'target_return_1h'
+        }
+
         for col in df.select_dtypes(include=[np.number]).columns:
             if col in ['id', 'timestamp', 'datetime', 'open', 'high', 'low', 'close', 'volume']:
                 continue
-                
+            if col in ignore_cols:
+                continue
+
             stats = df[col].describe()
             
             # Признаки стандартизации: mean≈0, std≈1
