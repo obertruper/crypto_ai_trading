@@ -238,9 +238,11 @@ class FeatureEngineer:
                 window_fast=macd_config['fast'],
                 window_sign=macd_config['signal']
             )
-            df['macd'] = macd.macd()
-            df['macd_signal'] = macd.macd_signal()
-            df['macd_diff'] = macd.macd_diff()
+            # Нормализуем MACD относительно цены для сравнимости между активами
+            # MACD в абсолютных значениях может быть очень большим для дорогих активов
+            df['macd'] = macd.macd() / df['close'] * 100  # В процентах от цены
+            df['macd_signal'] = macd.macd_signal() / df['close'] * 100
+            df['macd_diff'] = macd.macd_diff() / df['close'] * 100
         
         # Bollinger Bands
         bb_config = next((c for c in tech_config if c['name'] == 'bollinger_bands'), None)
@@ -289,7 +291,13 @@ class FeatureEngineer:
                 window=atr_config['period']
             ).average_true_range()
             
-            df['atr_pct'] = df['atr'] / df['close']
+            # ATR в процентах от цены с ограничением экстремальных значений
+            df['atr_pct'] = self.safe_divide(
+                df['atr'], 
+                df['close'],
+                fill_value=0.01,  # 1% по умолчанию
+                max_value=0.2     # Максимум 20% от цены
+            )
         
         # Stochastic
         stoch = ta.momentum.StochasticOscillator(
@@ -367,12 +375,14 @@ class FeatureEngineer:
         df['toxicity'] = np.exp(-df['price_impact'] * 20)
         df['toxicity'] = df['toxicity'].clip(0.3, 1.0)
         
-        # Амихуд неликвидность
+        # Амихуд неликвидность - скорректированная формула
+        # Традиционная формула: |returns| / dollar_volume
+        # Но мы масштабируем на миллион для получения значимых значений
         df['amihud_illiquidity'] = self.safe_divide(
-            df['returns'].abs(), 
+            df['returns'].abs() * 1e6,  # Масштабируем на миллион
             df['turnover'],
             fill_value=0.0,
-            max_value=1.0  # Неликвидность редко бывает больше 1
+            max_value=100.0  # Ограничиваем разумным максимумом
         )
         df['amihud_ma'] = df['amihud_illiquidity'].rolling(20).mean()
         
@@ -530,12 +540,15 @@ class FeatureEngineer:
             self.logger.info(f"  ✓ Паттерны накопления/распределения: создано 4 признака")
         
         # 7. Momentum и ускорение (4 признака)
-        df['momentum_1h'] = df['close'].pct_change(4) * 100  # 1 час
-        df['momentum_4h'] = df['close'].pct_change(16) * 100  # 4 часа
-        df['momentum_24h'] = df['close'].pct_change(96) * 100  # 24 часа
+        # Используем groupby для правильного расчета по символам
+        df['momentum_1h'] = df.groupby('symbol')['close'].pct_change(4) * 100  # 1 час
+        df['momentum_4h'] = df.groupby('symbol')['close'].pct_change(16) * 100  # 4 часа
+        df['momentum_24h'] = df.groupby('symbol')['close'].pct_change(96) * 100  # 24 часа
         
         # Ускорение (изменение momentum)
-        df['momentum_acceleration'] = df['momentum_1h'] - df['momentum_1h'].shift(4)
+        df['momentum_acceleration'] = df.groupby('symbol')['momentum_1h'].transform(
+            lambda x: x - x.shift(4)
+        )
         features_created.extend(['momentum_1h', 'momentum_4h', 'momentum_24h', 'momentum_acceleration'])
         
         if not self.disable_progress:
@@ -723,21 +736,38 @@ class FeatureEngineer:
         initial_cols = len(df.columns)
         features_created = []
         
-        leverage = 5  # Плечо x5 как указал пользователь
+        # Динамическое плечо на основе волатильности
+        # Базовое плечо 5x, но корректируем на основе ATR
+        base_leverage = 5
+        
+        # Корректируем плечо на основе волатильности
+        # Чем выше волатильность, тем меньше плечо
+        # ATR в процентах уже есть в df['atr_pct']
+        volatility_factor = df['atr_pct'].rolling(24).mean()  # Средняя волатильность за 6 часов
+        
+        # Плечо от 3x до 10x в зависимости от волатильности
+        # При волатильности 0.5% -> leverage = 10
+        # При волатильности 2% -> leverage = 3
+        dynamic_leverage = base_leverage * (0.01 / (volatility_factor + 0.001))
+        dynamic_leverage = dynamic_leverage.clip(3, 10)  # Ограничиваем диапазон
         
         # 1. Расчет ликвидационной цены
         # Для LONG: Liq Price = Entry Price * (1 - 1/leverage + fees)
         # Для SHORT: Liq Price = Entry Price * (1 + 1/leverage - fees)
         maintenance_margin = 0.5 / 100  # 0.5% для Bybit
         
-        df['long_liquidation_price'] = df['close'] * (1 - 1/leverage + maintenance_margin)
-        df['short_liquidation_price'] = df['close'] * (1 + 1/leverage - maintenance_margin)
+        df['long_liquidation_price'] = df['close'] * (1 - 1/dynamic_leverage + maintenance_margin)
+        df['short_liquidation_price'] = df['close'] * (1 + 1/dynamic_leverage - maintenance_margin)
         
         # Расстояние до ликвидации в процентах
         df['long_liquidation_distance_pct'] = ((df['close'] - df['long_liquidation_price']) / df['close']) * 100
         df['short_liquidation_distance_pct'] = ((df['short_liquidation_price'] - df['close']) / df['close']) * 100
+        
+        # Сохраняем текущее динамическое плечо
+        df['current_leverage'] = dynamic_leverage
         features_created.extend(['long_liquidation_price', 'short_liquidation_price',
-                               'long_liquidation_distance_pct', 'short_liquidation_distance_pct'])
+                               'long_liquidation_distance_pct', 'short_liquidation_distance_pct',
+                               'current_leverage'])
         
         if not self.disable_progress:
             self.logger.info(f"  ✓ Ликвидационные цены: создано 4 признака")
@@ -801,7 +831,7 @@ class FeatureEngineer:
         
         # Рекомендуемый размер позиции относительно VaR
         max_loss_per_trade = 2.0  # 2% максимальная потеря как в конфиге
-        df['recommended_position_size'] = max_loss_per_trade / (df['var_95'] * leverage)
+        df['recommended_position_size'] = max_loss_per_trade / (df['var_95'] * dynamic_leverage)
         features_created.extend(['var_95', 'recommended_position_size'])
         
         if not self.disable_progress:
@@ -981,10 +1011,10 @@ class FeatureEngineer:
         # Ранк доходности
         df['returns_rank'] = df.groupby('datetime')['returns'].rank(pct=True)
         
-        # 24-часовой моментум
-        df['momentum_24h'] = df.groupby('symbol')['returns'].transform(
-            lambda x: x.rolling(96, min_periods=48).sum()  # 96 = 24*4 (15мин интервалы), минимум 12 часов
-        )
+        # 24-часовой моментум - уже рассчитан в rally_detection_features
+        # Здесь только заполняем NaN значения если есть
+        if 'momentum_24h' in df.columns and df['momentum_24h'].isna().any():
+            df['momentum_24h'] = df['momentum_24h'].fillna(0)
         df['is_momentum_leader'] = (
             df.groupby('datetime')['momentum_24h']
             .rank(ascending=False) <= 5

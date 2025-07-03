@@ -90,6 +90,13 @@ class Trainer:
             'learning_rates': []
         }
         
+        # GPU оптимизации
+        if self.device.type == 'cuda':
+            # Периодическая очистка кэша GPU
+            self.gpu_cache_clear_freq = config['performance'].get('gpu_cache_clear_freq', 10)
+            # Мониторинг памяти GPU
+            self.monitor_gpu_memory = config['performance'].get('monitor_gpu_memory', True)
+        
         # Early stopping (улучшенная версия для борьбы с переобучением)
         self.best_val_loss = float('inf')
         self.patience_counter = 0
@@ -546,6 +553,20 @@ class Trainer:
             self.history['train_metrics'].append(train_metrics)
             self.history['val_metrics'].append(val_metrics)
             self.history['learning_rates'].append(current_lr)
+            
+            # GPU оптимизации
+            if self.device.type == 'cuda':
+                # Периодическая очистка кэша GPU
+                if (epoch + 1) % self.gpu_cache_clear_freq == 0:
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    self.logger.info(f"🧹 Очищен кэш GPU на эпохе {epoch + 1}")
+                
+                # Мониторинг памяти GPU
+                if self.monitor_gpu_memory and (epoch + 1) % 5 == 0:
+                    allocated = torch.cuda.memory_allocated() / 1024**3
+                    reserved = torch.cuda.memory_reserved() / 1024**3
+                    self.logger.info(f"💾 GPU память: выделено {allocated:.2f}GB, зарезервировано {reserved:.2f}GB")
             
             # Улучшенная логика борьбы с переобучением
             improvement = self.best_val_loss - val_metrics['loss']

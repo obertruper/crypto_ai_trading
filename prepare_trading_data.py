@@ -239,6 +239,8 @@ def prepare_features_for_trading(config: dict, logger, force_recreate: bool = Fa
                     pbar.update(1)
                 except Exception as e:
                     logger.error(f"❌ Ошибка при обработке {symbol}: {e}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
                     pbar.update(1)
     
     # Объединяем результаты
