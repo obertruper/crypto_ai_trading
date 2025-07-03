@@ -197,3 +197,12 @@ lsp_server/lsp_profile.json
 
 # Metabase data
 metabase-data/
+
+# Trading database backups
+trading_db_backup.sql
+*.sql.gz
+*.db.backup
+
+# Large cache files
+cache/*.pkl
+cache/features/*.pkl
