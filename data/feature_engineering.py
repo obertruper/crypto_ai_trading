@@ -339,12 +339,10 @@ class FeatureEngineer:
         # Ценовое воздействие - улучшенная формула
         # ИСПРАВЛЕНО: Используем dollar volume для более точной оценки
         df['dollar_volume'] = df['volume'] * df['close']
-        df['price_impact'] = self.safe_divide(
-            df['returns'].abs(), 
-            np.sqrt(df['dollar_volume'] + 1),  # Квадратный корень для сглаживания
-            fill_value=0.0,
-            max_value=10.0
-        )
+        # ИСПРАВЛЕНО: рассчитываем price_impact напрямую и ограничиваем диапазон
+        df['price_impact'] = (
+            df['returns'].abs() * np.sqrt(df['dollar_volume'] + 1)
+        ).clip(0, 10)
         
         # Альтернативная формула с логарифмом объема
         df['price_impact_log'] = self.safe_divide(
@@ -357,8 +355,8 @@ class FeatureEngineer:
         # ИСПРАВЛЕНО: Правильная формула toxicity с масштабированием
         # Toxicity = 1 / (1 + price_impact * scaling_factor)
         # Когда price_impact большой, toxicity маленькая (более токсичная среда)
-        df['toxicity'] = 1 / (1 + df['price_impact'] * 100)  # Масштабируем price_impact
-        df['toxicity'] = df['toxicity'].clip(0.5, 1.0)  # Разумные пределы [0.5, 1.0]
+        df['toxicity'] = 1 / (1 + df['price_impact'])
+        df['toxicity'] = df['toxicity'].clip(0.5, 1.0)
         
         # Амихуд неликвидность
         df['amihud_illiquidity'] = self.safe_divide(
@@ -467,10 +465,18 @@ class FeatureEngineer:
         ema20 = df['close'].ewm(span=20, adjust=False).mean()
         kc_upper = ema20 + atr_multiplier * df['atr']
         kc_lower = ema20 - atr_multiplier * df['atr']
-        kc_width = kc_upper - kc_lower
-        
+        # ИСПРАВЛЕНО: сравниваем относительные ширины каналов
+        kc_width = (kc_upper - kc_lower) / df['close']
+
         df['volatility_squeeze'] = (df['bb_width'] < kc_width).astype(int)
-        df['volatility_squeeze_duration'] = df.groupby((df['volatility_squeeze'] != df['volatility_squeeze'].shift()).cumsum())['volatility_squeeze'].cumsum()
+        # ИСПРАВЛЕНО: продолжительность сжатия считается только для периодов squeeze
+        squeeze_group = (df['volatility_squeeze'] != df['volatility_squeeze'].shift()).cumsum()
+        df['volatility_squeeze_duration'] = (
+            df['volatility_squeeze']
+            .groupby(squeeze_group)
+            .cumsum()
+        )
+        df.loc[df['volatility_squeeze'] == 0, 'volatility_squeeze_duration'] = 0
         features_created.extend(['volatility_squeeze', 'volatility_squeeze_duration'])
         
         if not self.disable_progress:

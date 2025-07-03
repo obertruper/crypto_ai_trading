@@ -404,6 +404,11 @@ def check_technical_indicators_enhanced(df, name):
         'price_direction', 'volume_zscore', 'momentum_1h', 'trend_1h_strength',
         'future_return_3', 'future_return_4', 'target_return_1h'
     ]
+    allowed_zscore = {
+        'price_direction', 'volume_zscore', 'momentum_1h',
+        'trend_1h_strength', 'future_return_3', 'future_return_4',
+        'target_return_1h'
+    }
     
     print(f"\n{Colors.BOLD}Проверка подозрительной нормализации:{Colors.ENDC}")
     normalization_issues = 0
@@ -418,11 +423,11 @@ def check_technical_indicators_enhanced(df, name):
             # 3. Но это не должно быть технический индикатор
             is_normalized = (abs(stats['mean']) < 0.1 and 0.8 < stats['std'] < 1.2)
             
-            if is_normalized and col not in ['volume_zscore']:  # volume_zscore должен быть нормализован
+            if is_normalized and col not in allowed_zscore:
                 print_error(f"{col}: ПОДОЗРЕНИЕ НА НОРМАЛИЗАЦИЮ! Mean={stats['mean']:.3f}, Std={stats['std']:.3f}")
                 issues.append(f"{col}_normalized")
                 normalization_issues += 1
-            elif col == 'volume_zscore' and is_normalized:
+            elif col in allowed_zscore and is_normalized:
                 print_success(f"{col}: корректная Z-score нормализация Mean={stats['mean']:.3f}, Std={stats['std']:.3f}")
             else:
                 print_success(f"{col}: нормальное распределение Mean={stats['mean']:.3f}, Std={stats['std']:.3f}")
