@@ -143,11 +143,14 @@ class IndicatorValidator:
         elif column in self.critical_ranges:
             # Специальная логика для разных типов индикаторов
             if column == 'toxicity':
-                # Toxicity = 1/(1+price_impact), обычно близок к 1
-                if actual_mean < 0.9 or actual_mean > 1.0:
+                # ИСПРАВЛЕНО: Toxicity = exp(-price_impact*20), распределение от 0.3 до 1.0
+                if actual_mean < 0.3 or actual_mean > 1.0:
+                    status = 'error'
+                    messages.append(f"❌ {column}: Значение вне допустимого диапазона")
+                elif actual_mean < 0.6 or actual_mean > 0.9:
                     status = 'warning'
                     messages.append(f"⚠️ {column}: Необычное среднее значение")
-                    messages.append(f"   Mean={actual_mean:.4f} (ожидается ≈0.99-1.0)")
+                    messages.append(f"   Mean={actual_mean:.4f} (ожидается ≈0.7-0.85)")
             elif column in ['rsi_oversold', 'rsi_overbought']:
                 # Бинарные индикаторы - редко активны, mean обычно низкий
                 if actual_mean > 0.3:  # Если более 30% времени активен - подозрительно

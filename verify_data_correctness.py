@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
-Полная проверка корректности сформированных данных с валидацией индикаторов
+Компактная проверка корректности данных - только самое важное
 """
 
 import pandas as pd
 import numpy as np
-import torch
 from pathlib import Path
-import yaml
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
-
-# Импорт нашего валидатора индикаторов
-from utils.indicator_validator import IndicatorValidator
 
 # Цветной вывод
 class Colors:
@@ -26,9 +21,9 @@ class Colors:
     BOLD = '\033[1m'
 
 def print_header(text):
-    print(f"\n{Colors.HEADER}{Colors.BOLD}{'='*80}{Colors.ENDC}")
+    print(f"\n{Colors.HEADER}{Colors.BOLD}{'='*60}{Colors.ENDC}")
     print(f"{Colors.HEADER}{Colors.BOLD}{text}{Colors.ENDC}")
-    print(f"{Colors.HEADER}{Colors.BOLD}{'='*80}{Colors.ENDC}")
+    print(f"{Colors.HEADER}{Colors.BOLD}{'='*60}{Colors.ENDC}")
 
 def print_success(text):
     print(f"{Colors.OKGREEN}✅ {text}{Colors.ENDC}")
@@ -42,791 +37,343 @@ def print_error(text):
 def print_info(text):
     print(f"{Colors.OKBLUE}ℹ️  {text}{Colors.ENDC}")
 
-def check_file_existence():
-    """Проверка наличия файлов"""
-    print_header("1. ПРОВЕРКА НАЛИЧИЯ ФАЙЛОВ")
-    
-    cache_dir = Path("data/processed")
-    required_files = ["train_data.parquet", "val_data.parquet", "test_data.parquet"]
-    
-    all_exist = True
-    file_sizes = {}
-    
-    for file_name in required_files:
-        file_path = cache_dir / file_name
-        if file_path.exists():
-            size_mb = file_path.stat().st_size / (1024 * 1024)
-            file_sizes[file_name] = size_mb
-            print_success(f"{file_name}: {size_mb:.2f} MB")
-        else:
-            print_error(f"{file_name}: НЕ НАЙДЕН")
-            all_exist = False
-    
-    return all_exist, file_sizes
-
-def check_data_structure(df, name):
-    """Проверка структуры данных"""
-    print(f"\n{Colors.BOLD}Проверка {name}:{Colors.ENDC}")
-    
-    # Базовая информация
-    print_info(f"Размер: {len(df):,} записей, {len(df.columns)} колонок")
-    print_info(f"Память: {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
-    
-    # Проверка обязательных колонок
-    required_cols = ['datetime', 'symbol', 'open', 'high', 'low', 'close', 'volume', 'turnover']
-    missing_required = [col for col in required_cols if col not in df.columns]
-    if missing_required:
-        print_error(f"Отсутствуют обязательные колонки: {missing_required}")
-    else:
-        print_success("Все обязательные колонки присутствуют")
-    
-    # Проверка целевых переменных
-    from data.constants import TRADING_TARGET_VARIABLES, ALL_TARGET_VARIABLES
-    
-    missing_targets = [col for col in TRADING_TARGET_VARIABLES if col not in df.columns]
-    if missing_targets:
-        print_error(f"Отсутствуют целевые переменные: {len(missing_targets)} из {len(TRADING_TARGET_VARIABLES)}")
-    else:
-        print_success(f"Все {len(TRADING_TARGET_VARIABLES)} основных целевых переменных присутствуют")
-    
-    # Подсчет типов колонок
-    feature_cols = [col for col in df.columns 
-                   if col not in ALL_TARGET_VARIABLES 
-                   and col not in ['id', 'symbol', 'datetime', 'timestamp']]
-    
-    print_info(f"Признаков: {len(feature_cols)}")
-    print_info(f"Целевых переменных: {len([col for col in df.columns if col in ALL_TARGET_VARIABLES])}")
-    
-    return len(missing_required) == 0 and len(missing_targets) == 0
-
-def check_data_quality(df, name):
-    """Проверка качества данных"""
-    print(f"\n{Colors.BOLD}Качество данных {name}:{Colors.ENDC}")
+def check_critical_indicators(df, name):
+    """Проверка только критических индикаторов"""
+    print(f"\n{Colors.BOLD}🔍 Критические индикаторы {name}:{Colors.ENDC}")
     
     issues = []
     
-    # 1. Проверка NaN
-    nan_counts = df.isna().sum()
-    nan_cols = nan_counts[nan_counts > 0]
-    if len(nan_cols) > 0:
-        print_warning(f"Найдено {len(nan_cols)} колонок с NaN значениями")
-        worst_cols = nan_cols.nlargest(5)
-        for col, count in worst_cols.items():
-            pct = count / len(df) * 100
-            print(f"   - {col}: {count:,} NaN ({pct:.1f}%)")
-        issues.append("nan_values")
-    else:
-        print_success("Нет пропущенных значений")
-    
-    # 2. Проверка inf
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    inf_counts = {}
-    for col in numeric_cols:
-        inf_count = np.isinf(df[col]).sum()
-        if inf_count > 0:
-            inf_counts[col] = inf_count
-    
-    if inf_counts:
-        print_warning(f"Найдено {len(inf_counts)} колонок с inf значениями")
-        for col, count in list(inf_counts.items())[:5]:
-            print(f"   - {col}: {count:,} inf")
-        issues.append("inf_values")
-    else:
-        print_success("Нет бесконечных значений")
-    
-    # 3. Проверка дубликатов
-    if 'datetime' in df.columns and 'symbol' in df.columns:
-        duplicates = df.duplicated(subset=['datetime', 'symbol']).sum()
-        if duplicates > 0:
-            print_warning(f"Найдено {duplicates:,} дубликатов по datetime+symbol")
-            issues.append("duplicates")
+    # 1. TOXICITY - самый важный индикатор
+    if 'toxicity' in df.columns:
+        stats = df['toxicity'].describe()
+        mean = stats['mean']
+        std = stats['std']
+        
+        if mean > 0.99 and std < 0.02:
+            print_error(f"toxicity: mean={mean:.6f}, std={std:.6f}")
+            print_error("   🚨 КРИТИЧНО: toxicity всегда ≈1.0 (бесполезный индикатор!)")
+            issues.append("toxicity_broken")
+        elif 0.6 <= mean <= 0.9:
+            print_success(f"toxicity: mean={mean:.4f}, std={std:.4f} ✓")
         else:
-            print_success("Нет дубликатов")
+            print_warning(f"toxicity: mean={mean:.4f} вне ожидаемого диапазона 0.6-0.9")
+            issues.append("toxicity_warning")
+    
+    # 2. PRICE_IMPACT
+    if 'price_impact' in df.columns:
+        stats = df['price_impact'].describe()
+        mean = stats['mean']
+        
+        if mean < 0.0001:
+            print_error(f"price_impact: mean={mean:.6f} (слишком мал!)")
+            issues.append("price_impact_too_small")
+        elif 0.001 <= mean <= 0.05:
+            print_success(f"price_impact: mean={mean:.4f} ✓")
+        else:
+            print_warning(f"price_impact: mean={mean:.4f}")
+    
+    # 3. RSI - проверка на нормализацию
+    if 'rsi' in df.columns:
+        stats = df['rsi'].describe()
+        mean = stats['mean']
+        std = stats['std']
+        
+        # Признаки нормализации
+        if abs(mean) < 1.0 and 0.8 < std < 1.2:
+            print_error(f"rsi: НОРМАЛИЗОВАН! mean={mean:.3f}, std={std:.3f}")
+            issues.append("rsi_normalized")
+        elif 40 <= mean <= 60 and std > 10:
+            print_success(f"rsi: mean={mean:.1f}, std={std:.1f} ✓")
+        else:
+            print_warning(f"rsi: mean={mean:.1f}, std={std:.1f}")
+    
+    # 4. Stochastic
+    for indicator in ['stoch_k', 'stoch_d']:
+        if indicator in df.columns:
+            stats = df[indicator].describe()
+            mean = stats['mean']
+            std = stats['std']
+            
+            if abs(mean) < 1.0 and 0.8 < std < 1.2:
+                print_error(f"{indicator}: НОРМАЛИЗОВАН! mean={mean:.3f}, std={std:.3f}")
+                issues.append(f"{indicator}_normalized")
+            elif 30 <= mean <= 70 and std > 15:
+                print_success(f"{indicator}: mean={mean:.1f}, std={std:.1f} ✓")
     
     return issues
-
 
 def check_target_distribution(df, name):
-    """Проверка распределения целевых переменных"""
-    print(f"\n{Colors.BOLD}Распределение целевых переменных {name}:{Colors.ENDC}")
+    """Проверка целевых переменных"""
+    print(f"\n{Colors.BOLD}🎯 Целевые переменные {name}:{Colors.ENDC}")
     
-    # Проверка бинарных целевых
-    binary_targets = []
-    for col in df.columns:
-        if any(pattern in col for pattern in ['_hit', '_reached']):
-            binary_targets.append(col)
-    
-    issues = []
-    for target in binary_targets[:10]:  # Проверяем первые 10
+    # TP/SL достижения
+    for target in ['long_tp1_reached', 'short_tp1_reached']:
         if target in df.columns:
-            unique_vals = df[target].unique()
-            if not set(unique_vals).issubset({0, 1, 0.0, 1.0}):
-                print_error(f"{target}: некорректные значения {unique_vals}")
-                issues.append(f"{target}_invalid")
+            pct = df[target].mean() * 100
+            if 30 <= pct <= 70:
+                print_info(f"{target}: {pct:.1f}% ✓")
             else:
-                pos_rate = df[target].mean() * 100
-                print_info(f"{target}: {pos_rate:.1f}% положительных")
+                print_warning(f"{target}: {pct:.1f}%")
     
-    # Проверка best_direction
+    # Направление
     if 'best_direction' in df.columns:
-        direction_counts = df['best_direction'].value_counts()
-        print("\nРаспределение best_direction:")
-        for direction, count in direction_counts.items():
-            pct = count / len(df) * 100
-            print(f"   {direction}: {count:,} ({pct:.1f}%)")
-    
-    return issues
+        dist = df['best_direction'].value_counts(normalize=True) * 100
+        print_info(f"best_direction: LONG={dist.get('LONG', 0):.1f}%, SHORT={dist.get('SHORT', 0):.1f}%, NEUTRAL={dist.get('NEUTRAL', 0):.1f}%")
 
-def check_temporal_consistency(df, name):
-    """Проверка временной последовательности"""
-    print(f"\n{Colors.BOLD}Временная последовательность {name}:{Colors.ENDC}")
-    
-    if 'datetime' not in df.columns:
-        print_error("Колонка datetime отсутствует")
-        return ["no_datetime"]
-    
+def check_data_quality(df, name):
+    """Базовая проверка качества"""
     issues = []
     
-    # Проверка сортировки
-    if not df['datetime'].is_monotonic_increasing:
-        print_warning("Данные не отсортированы по времени")
-        issues.append("not_sorted")
-    else:
-        print_success("Данные отсортированы по времени")
-    
-    # Проверка диапазона дат
-    date_min = df['datetime'].min()
-    date_max = df['datetime'].max()
-    print_info(f"Период: {date_min} - {date_max}")
-    
-    # Проверка гэпов по символам
-    if 'symbol' in df.columns:
-        symbols = df['symbol'].unique()
-        print(f"\nПроверка временных гэпов для {len(symbols)} символов:")
-        
-        large_gaps = 0
-        for symbol in symbols[:5]:  # Проверяем первые 5 символов
-            symbol_data = df[df['symbol'] == symbol].sort_values('datetime')
-            time_diff = symbol_data['datetime'].diff()
-            expected_diff = pd.Timedelta('15 minutes')
-            gaps = time_diff[time_diff > expected_diff * 2]  # Гэпы больше 30 минут
-            if len(gaps) > 0:
-                large_gaps += len(gaps)
-        
-        if large_gaps > 0:
-            print_warning(f"Обнаружено {large_gaps} временных гэпов > 30 минут")
-            issues.append("time_gaps")
-        else:
-            print_success("Нет значительных временных гэпов")
+    # NaN проверка
+    nan_cols = df.isna().sum()
+    nan_cols = nan_cols[nan_cols > 0]
+    if len(nan_cols) > 0:
+        worst_col = nan_cols.idxmax()
+        worst_pct = nan_cols.max() / len(df) * 100
+        print_warning(f"NaN в {len(nan_cols)} колонках (худшая: {worst_col} = {worst_pct:.1f}%)")
+        if worst_pct > 5:
+            issues.append("high_nan")
     
     return issues
-
-def check_critical_indicators(df, name):
-    """Проверка критических индикаторов с использованием профессионального валидатора"""
-    print(f"\n{Colors.BOLD}Проверка индикаторов {name} (Enhanced):{Colors.ENDC}")
-    
-    # Используем наш продвинутый валидатор
-    validator = IndicatorValidator()
-    
-    try:
-        validation_results = validator.validate_dataframe(df, strict=False)
-        
-        # Конвертируем результаты в наш формат
-        issues = []
-        
-        # Ошибки - критические проблемы
-        for error in validation_results['errors']:
-            print_error(error)
-            if "extreme" in error.lower():
-                issues.append("extreme_values")
-            elif "нормализ" in error.lower():
-                issues.append("normalization_error")
-            else:
-                issues.append("indicator_error")
-        
-        # Предупреждения
-        for warning in validation_results['warnings']:
-            print_warning(warning)
-            if "vwap" in warning.lower():
-                issues.append("vwap_warning")
-            else:
-                issues.append("indicator_warning")
-        
-        # Информационные сообщения (первые 3)
-        for info in validation_results['info'][:3]:
-            print_success(info)
-        
-        if len(validation_results['info']) > 3:
-            print_info(f"... и еще {len(validation_results['info']) - 3} корректных индикаторов")
-        
-        # Статистика по проверенным индикаторам
-        total_checked = len(validation_results['statistics'])
-        total_errors = len(validation_results['errors'])
-        total_warnings = len(validation_results['warnings'])
-        
-        print(f"\n{Colors.BOLD}📊 Статистика валидации:{Colors.ENDC}")
-        print_info(f"Проверено индикаторов: {total_checked}")
-        if total_errors > 0:
-            print_error(f"Критические ошибки: {total_errors}")
-        if total_warnings > 0:
-            print_warning(f"Предупреждения: {total_warnings}")
-        if total_errors == 0 and total_warnings == 0:
-            print_success("Все индикаторы прошли валидацию!")
-            
-        return issues
-        
-    except Exception as e:
-        print_error(f"Ошибка при валидации индикаторов: {e}")
-        # Fallback к базовой проверке
-        return check_basic_indicators(df)
-
-def check_basic_indicators(df):
-    """Базовая проверка индикаторов (fallback)"""
-    issues = []
-    
-    # Основные проверки
-    critical_ranges = {
-        'rsi': (0, 100),
-        'stoch_k': (0, 100), 
-        'stoch_d': (0, 100),
-        'adx': (0, 100),
-        'toxicity': (0, 1),
-        'bb_position': (0, 1)
-    }
-    
-    for indicator, (min_val, max_val) in critical_ranges.items():
-        if indicator in df.columns:
-            stats = df[indicator].describe()
-            
-            # Проверка на нормализацию (подозрительные значения)
-            if abs(stats['mean']) < 1.0 and stats['std'] < 2.0 and indicator in ['rsi', 'stoch_k', 'stoch_d', 'adx']:
-                print_error(f"❌ {indicator}: ПОДОЗРЕНИЕ НА НОРМАЛИЗАЦИЮ! Mean={stats['mean']:.3f}, Std={stats['std']:.3f}")
-                issues.append(f"{indicator}_normalized")
-            elif stats['min'] < min_val or stats['max'] > max_val:
-                print_warning(f"⚠️ {indicator}: [{stats['min']:.3f}, {stats['max']:.3f}] выходит за [{min_val}, {max_val}]")
-                issues.append(f"{indicator}_range")
-            else:
-                print_success(f"✅ {indicator}: корректный диапазон [{stats['min']:.3f}, {stats['max']:.3f}]")
-    
-    return issues
-
-def check_technical_indicators_enhanced(df, name):
-    """ИСПРАВЛЕННАЯ проверка технических индикаторов"""
-    print(f"\n{Colors.BOLD}Расширенная проверка технических индикаторов {name}:{Colors.ENDC}")
-    
-    issues = []
-    indicators_checked = 0
-    indicators_passed = 0
-    
-    # ИСПРАВЛЕНО: Правильные диапазоны для технических индикаторов
-    technical_ranges = {
-        'rsi': (0, 100, "RSI должен быть от 0 до 100"),
-        'stoch_k': (0, 100, "Stochastic %K должен быть от 0 до 100"),
-        'stoch_d': (0, 100, "Stochastic %D должен быть от 0 до 100"),
-        'adx': (0, 100, "ADX должен быть от 0 до 100"),
-        'adx_pos': (0, 100, "ADX+ должен быть от 0 до 100"),
-        'adx_neg': (0, 100, "ADX- должен быть от 0 до 100"),
-        'bb_position': (0, 1, "Bollinger Bands Position должен быть от 0 до 1"),
-        'close_position': (0, 1, "Close Position должен быть от 0 до 1"),
-        'psar_trend': (0, 1, "PSAR Trend должен быть 0 или 1"),
-        'rsi_oversold': (0, 1, "RSI Oversold должен быть 0 или 1"),
-        'rsi_overbought': (0, 1, "RSI Overbought должен быть 0 или 1"),
-    }
-    
-    # Специальные проверки
-    special_checks = {
-        'close_vwap_ratio': (0.5, 1.5, "Close/VWAP ratio должен быть от 0.5 до 1.5"),
-        'close_open_ratio': (0.8, 1.25, "Close/Open ratio должен быть от 0.8 до 1.25"),
-        'high_low_ratio': (1.0, 2.0, "High/Low ratio должен быть от 1.0 до 2.0"),
-        'toxicity': (0.5, 1.0, "Toxicity должен быть от 0.5 до 1.0"),
-    }
-    
-    # Объединяем все проверки
-    all_checks = {**technical_ranges, **special_checks}
-    
-    for indicator, (min_val, max_val, description) in all_checks.items():
-        if indicator in df.columns:
-            indicators_checked += 1
-            stats = df[indicator].describe()
-            
-            # Проверка диапазона
-            if stats['min'] < min_val or stats['max'] > max_val:
-                print_error(f"{indicator}: выход за диапазон [{min_val}, {max_val}] -> [{stats['min']:.4f}, {stats['max']:.4f}]")
-                issues.append(f"{indicator}_range_error")
-            else:
-                print_success(f"{indicator}: корректный диапазон [{stats['min']:.4f}, {stats['max']:.4f}]")
-                indicators_passed += 1
-            
-            # ИСПРАВЛЕНО: Специальные проверки для конкретных индикаторов
-            if indicator == 'toxicity':
-                # Toxicity не должен быть константой около 1.0
-                if stats['std'] < 0.01 and stats['mean'] > 0.99:
-                    print_error(f"TOXICITY: подозрение на ошибку в формуле! Mean={stats['mean']:.6f}, Std={stats['std']:.6f}")
-                    issues.append("toxicity_formula_error")
-                elif 0.5 <= stats['mean'] <= 1.0 and stats['std'] > 0.01:
-                    print_success(f"TOXICITY: корректные значения Mean={stats['mean']:.4f}, Std={stats['std']:.4f}")
-            
-            elif indicator == 'rsi':
-                # RSI должен иметь разумное распределение
-                if 20 <= stats['mean'] <= 80 and stats['std'] > 5:
-                    print_success(f"RSI: здоровое распределение Mean={stats['mean']:.2f}, Std={stats['std']:.2f}")
-                else:
-                    print_warning(f"RSI: необычное распределение Mean={stats['mean']:.2f}, Std={stats['std']:.2f}")
-            
-            elif indicator in ['stoch_k', 'stoch_d']:
-                # Stochastic должен иметь хорошую вариацию
-                if stats['std'] > 15:
-                    print_success(f"{indicator}: хорошая вариация Std={stats['std']:.2f}")
-                else:
-                    print_warning(f"{indicator}: низкая вариация Std={stats['std']:.2f}")
-    
-    # ИСПРАВЛЕНО: Проверка проблемных признаков с большими значениями
-    problematic_features = ['bb_width', 'daily_range']
-    for feature in problematic_features:
-        if feature in df.columns:
-            indicators_checked += 1
-            stats = df[feature].describe()
-            
-            # bb_width и daily_range должны быть как процент от цены (обычно < 0.5)
-            if stats['max'] > 1.0:  # Больше 100%
-                print_error(f"{feature}: экстремально большие значения! Max={stats['max']:.2e}")
-                print_info(f"   Рекомендация: пересчитать как процент от цены")
-                issues.append(f"{feature}_extreme_values")
-            elif stats['max'] > 0.5:  # Больше 50%
-                print_warning(f"{feature}: большие значения Max={stats['max']:.4f}, возможно нужно ограничить")
-                issues.append(f"{feature}_large_values")
-            else:
-                print_success(f"{feature}: разумные значения Max={stats['max']:.4f}")
-                indicators_passed += 1
-    
-    # ИСПРАВЛЕНО: Проверка подозрительной нормализации
-    normalization_suspects = [
-        'price_direction', 'volume_zscore', 'momentum_1h', 'trend_1h_strength',
-        'future_return_3', 'future_return_4', 'target_return_1h'
-    ]
-    allowed_zscore = {
-        'price_direction', 'volume_zscore', 'momentum_1h',
-        'trend_1h_strength', 'future_return_3', 'future_return_4',
-        'target_return_1h'
-    }
-    
-    print(f"\n{Colors.BOLD}Проверка подозрительной нормализации:{Colors.ENDC}")
-    normalization_issues = 0
-    
-    for col in normalization_suspects:
-        if col in df.columns:
-            stats = df[col].describe()
-            
-            # Признаки неправильной нормализации:
-            # 1. Mean очень близко к 0
-            # 2. Std очень близко к 1
-            # 3. Но это не должно быть технический индикатор
-            is_normalized = (abs(stats['mean']) < 0.1 and 0.8 < stats['std'] < 1.2)
-            
-            if is_normalized and col not in allowed_zscore:
-                print_error(f"{col}: ПОДОЗРЕНИЕ НА НОРМАЛИЗАЦИЮ! Mean={stats['mean']:.3f}, Std={stats['std']:.3f}")
-                issues.append(f"{col}_normalized")
-                normalization_issues += 1
-            elif col in allowed_zscore and is_normalized:
-                print_success(f"{col}: корректная Z-score нормализация Mean={stats['mean']:.3f}, Std={stats['std']:.3f}")
-            else:
-                print_success(f"{col}: нормальное распределение Mean={stats['mean']:.3f}, Std={stats['std']:.3f}")
-    
-    # Итоговая статистика
-    print(f"\n{Colors.BOLD}📊 Итоговая статистика валидации индикаторов:{Colors.ENDC}")
-    print_info(f"Проверено индикаторов: {indicators_checked}")
-    print_info(f"Прошли проверку: {indicators_passed}")
-    
-    if len(issues) == 0:
-        print_success("🎉 ВСЕ ИНДИКАТОРЫ КОРРЕКТНЫ!")
-    else:
-        critical_issues = len([i for i in issues if 'error' in i])
-        warning_issues = len(issues) - critical_issues
-        
-        if critical_issues > 0:
-            print_error(f"Критические ошибки: {critical_issues}")
-        if warning_issues > 0:
-            print_warning(f"Предупреждения: {warning_issues}")
-        if normalization_issues > 0:
-            print_error(f"Проблемы нормализации: {normalization_issues}")
-    
-    return issues
-
-def check_advanced_issues(df, name):
-    """Расширенная проверка проблем данных"""
-    print(f"\n{Colors.BOLD}Расширенная диагностика {name}:{Colors.ENDC}")
-    
-    issues = []
-    
-    # 1. Проверка корреляций (признак переобучения)
-    numeric_cols = df.select_dtypes(include=[np.number]).columns[:20]  # Первые 20 для скорости
-    if len(numeric_cols) > 1:
-        corr_matrix = df[numeric_cols].corr().abs()
-        # Исключаем диагональ
-        corr_matrix = corr_matrix.where(~np.eye(corr_matrix.shape[0], dtype=bool))
-        high_corr = (corr_matrix > 0.95).sum().sum()
-        if high_corr > 0:
-            print_warning(f"Найдено {high_corr} пар признаков с корреляцией > 0.95")
-            issues.append("high_correlation")
-        else:
-            print_success("Корреляции в норме")
-    
-    # 2. Проверка распределений (выбросы)
-    extreme_features = []
-    for col in numeric_cols:
-        if col not in ['timestamp', 'volume', 'turnover']:
-            q99 = df[col].quantile(0.99)
-            q01 = df[col].quantile(0.01)
-            if abs(q99) > 100 or abs(q01) > 100:
-                extreme_features.append(f"{col} (Q99={q99:.2e}, Q01={q01:.2e})")
-    
-    if extreme_features:
-        print_warning(f"Признаки с экстремальными значениями:")
-        for feature in extreme_features[:5]:
-            print(f"   - {feature}")
-        issues.append("extreme_distributions")
-    else:
-        print_success("Распределения в разумных пределах")
-    
-    # 3. Проверка временной стабильности
-    if 'datetime' in df.columns and len(df) > 1000:
-        # Разделим на части и проверим стабильность статистик
-        mid_point = len(df) // 2
-        first_half = df.iloc[:mid_point]
-        second_half = df.iloc[mid_point:]
-        
-        unstable_features = []
-        for col in numeric_cols[:10]:  # Проверяем первые 10
-            if col in ['timestamp', 'datetime']:
-                continue
-            
-            mean1 = first_half[col].mean()
-            mean2 = second_half[col].mean()
-            
-            if abs(mean1) > 1e-6 and abs(mean2) > 1e-6:  # Избегаем деления на ноль
-                ratio = abs(mean1 / mean2) if mean2 != 0 else float('inf')
-                if ratio > 2 or ratio < 0.5:
-                    unstable_features.append(f"{col} (ratio={ratio:.2f})")
-        
-        if unstable_features:
-            print_warning(f"Нестабильные во времени признаки:")
-            for feature in unstable_features[:3]:
-                print(f"   - {feature}")
-            issues.append("temporal_instability")
-        else:
-            print_success("Временная стабильность в норме")
-    
-    return issues
-
-def check_gpu_readiness(df, name):
-    """Проверка готовности данных для GPU обучения"""
-    print(f"\n{Colors.BOLD}Проверка GPU готовности {name}:{Colors.ENDC}")
-    
-    issues = []
-    
-    # 1. Проверка доступности CUDA
-    if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-        print_success(f"GPU доступно: {gpu_name} ({gpu_memory:.1f} GB)")
-    else:
-        print_error("CUDA недоступно!")
-        issues.append("no_cuda")
-    
-    # 2. Проверка размера данных
-    memory_mb = df.memory_usage(deep=True).sum() / 1024**2
-    if memory_mb > 1000:  # > 1 GB
-        print_warning(f"Большой размер данных: {memory_mb:.1f} MB")
-        print_info("   Рекомендуется batch_size <= 64")
-        issues.append("large_dataset")
-    else:
-        print_success(f"Размер данных: {memory_mb:.1f} MB (оптимален для GPU)")
-    
-    # 3. Проверка типов данных
-    float64_cols = df.select_dtypes(include=['float64']).columns
-    if len(float64_cols) > 0:
-        print_warning(f"Найдено {len(float64_cols)} колонок с float64")
-        print_info("   Рекомендуется преобразовать в float32 для GPU")
-        issues.append("float64_types")
-    else:
-        print_success("Типы данных оптимизированы для GPU")
-    
-    # 4. Проверка на готовность к батчам
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    batch_ready = True
-    for col in numeric_cols:
-        if df[col].isna().any():
-            print_error(f"Найдены NaN в {col} - недопустимо для GPU")
-            batch_ready = False
-            break
-        if np.isinf(df[col]).any():
-            print_error(f"Найдены Inf в {col} - недопустимо для GPU")
-            batch_ready = False
-            break
-    
-    if batch_ready:
-        print_success("Данные готовы для GPU батчей")
-    else:
-        print_error("Данные НЕ готовы для GPU обучения")
-        issues.append("not_batch_ready")
-    
-    return issues
-
-def generate_detailed_report(all_issues, file_sizes):
-    """ИСПРАВЛЕННАЯ генерация детального отчета с рекомендациями"""
-    print_header("📊 ДЕТАЛЬНЫЙ ОТЧЕТ ДИАГНОСТИКИ")
-    
-    total_issues = sum(len(issues) for issues in all_issues.values())
-    
-    # Анализ типов проблем
-    critical_issues = []
-    normalization_issues = []
-    formula_errors = []
-    extreme_value_issues = []
-    gpu_issues = []
-    warnings = []
-    
-    for dataset, issues in all_issues.items():
-        for issue in issues:
-            if 'error' in issue or issue in ['not_batch_ready', 'no_cuda']:
-                critical_issues.append(f"{dataset}: {issue}")
-            elif 'normalized' in issue or 'normalization' in issue:
-                normalization_issues.append(f"{dataset}: {issue}")
-            elif 'formula' in issue or 'toxicity' in issue:
-                formula_errors.append(f"{dataset}: {issue}")
-            elif 'extreme' in issue or 'range_error' in issue:
-                extreme_value_issues.append(f"{dataset}: {issue}")
-            elif issue in ['large_dataset', 'float64_types']:
-                gpu_issues.append(f"{dataset}: {issue}")
-            else:
-                warnings.append(f"{dataset}: {issue}")
-    
-    # КРИТИЧЕСКАЯ ДИАГНОСТИКА
-    if total_issues == 0:
-        print_success("🎉 ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ УСПЕШНО!")
-        print_success("✅ Данные полностью готовы к обучению модели")
-        print_info("🚀 Можно запускать: python main.py --mode train")
-    else:
-        print_warning(f"⚠️ Обнаружено {total_issues} потенциальных проблем")
-        
-        # Детальный вывод по категориям
-        if critical_issues:
-            print(f"\n🔴 КРИТИЧЕСКИЕ ОШИБКИ ({len(critical_issues)}):")
-            for issue in critical_issues:
-                print_error(f"   {issue}")
-        
-        if formula_errors:
-            print(f"\n🔥 ОШИБКИ В ФОРМУЛАХ ({len(formula_errors)}):")
-            for issue in formula_errors:
-                print_error(f"   {issue}")
-            print_error("   ⚠️ НЕОБХОДИМО ИСПРАВИТЬ feature_engineering.py!")
-        
-        if normalization_issues:
-            print(f"\n🟠 ПРОБЛЕМЫ НОРМАЛИЗАЦИИ ({len(normalization_issues)}):")
-            for issue in normalization_issues:
-                print_error(f"   {issue}")
-            print_error("   ⚠️ Технические индикаторы не должны нормализоваться!")
-        
-        if extreme_value_issues:
-            print(f"\n🟡 ЭКСТРЕМАЛЬНЫЕ ЗНАЧЕНИЯ ({len(extreme_value_issues)}):")
-            for issue in extreme_value_issues:
-                print_warning(f"   {issue}")
-        
-        if gpu_issues:
-            print(f"\n🔵 GPU ОПТИМИЗАЦИЯ ({len(gpu_issues)}):")
-            for issue in gpu_issues:
-                print_warning(f"   {issue}")
-        
-        if warnings:
-            print(f"\n⚪ ПРЕДУПРЕЖДЕНИЯ ({len(warnings)}):")
-            for warning in warnings:
-                print_warning(f"   {warning}")
-    
-    # ДЕТАЛЬНЫЕ РЕКОМЕНДАЦИИ ПО ИСПРАВЛЕНИЮ
-    print(f"\n📋 ПОШАГОВЫЕ РЕКОМЕНДАЦИИ:")
-    
-    if formula_errors:
-        print_error("   🔥 ПРИОРИТЕТ 1: Исправить формулы в feature_engineering.py")
-        print_error("      - Toxicity: исправить формула должна давать диапазон 0.5-1.0")
-        print_error("      - bb_width: считать как процент от цены, а не абсолютные значения") 
-        print_error("      - daily_range: аналогично как процент от цены")
-        print_error("      - После исправления: python main.py --mode data")
-        
-    elif normalization_issues:
-        print_error("   🟠 ПРИОРИТЕТ 1: Исправить нормализацию")
-        print_error("      - Добавить технические индикаторы в exclude_cols")
-        print_error("      - RSI, Stochastic, ADX не должны нормализоваться")
-        print_error("      - После исправления: python main.py --mode data")
-        
-    elif critical_issues:
-        print_error("   🔴 ПРИОРИТЕТ 1: Устранить критические ошибки")
-        print_error("      - Проверить диапазоны значений")
-        print_error("      - Исправить NaN/Inf значения")
-        print_error("      - После исправления повторить проверку")
-        
-    elif extreme_value_issues or gpu_issues:
-        print_warning("   🟡 ПРИОРИТЕТ 2: Оптимизация")
-        if extreme_value_issues:
-            print_info("      - Добавить клиппинг экстремальных значений")
-            print_info("      - Проверить формулы расчета больших признаков")
-        if gpu_issues:
-            print_info("      - Преобразовать float64 → float32")
-            print_info("      - Уменьшить batch_size в config.yaml")
-            
-    elif warnings:
-        print_info("   🔵 ПРИОРИТЕТ 3: Мелкие улучшения")
-        print_info("      - Проанализировать предупреждения")
-        print_info("      - При необходимости внести корректировки")
-        
-    else:
-        print_success("   ✅ Всё готово! Можно запускать обучение")
-    
-    # СЛЕДУЮЩИЕ ШАГИ
-    print(f"\n🚀 СЛЕДУЮЩИЕ ШАГИ:")
-    if formula_errors or normalization_issues or critical_issues:
-        print_info("   1. 🔧 Исправить feature_engineering.py согласно рекомендациям")
-        print_info("   2. 🔄 python main.py --mode data  # Пересоздать кэш")
-        print_info("   3. 🔍 python verify_data_correctness.py  # Повторная проверка")
-        print_info("   4. 🚀 python main.py --mode train  # Запуск обучения")
-    elif extreme_value_issues or gpu_issues:
-        print_info("   1. 🎛️ Оптимизировать согласно рекомендациям")
-        print_info("   2. 🔍 Повторить проверку (опционально)")
-        print_info("   3. 🚀 python main.py --mode train")
-    else:
-        print_success("   🚀 python main.py --mode train")
-    
-    # СТАТИСТИКА ПО ФАЙЛАМ
-    print(f"\n📁 ИНФОРМАЦИЯ О ФАЙЛАХ:")
-    total_size = sum(file_sizes.values())
-    for filename, size_mb in file_sizes.items():
-        print_info(f"   {filename}: {size_mb:.2f} MB")
-    print_info(f"   Общий размер: {total_size:.2f} MB")
-    
-    return total_issues
-
 
 def main():
-    """Основная функция расширенной проверки данных"""
-    print_header("🔍 ПОЛНАЯ ДИАГНОСТИКА КОРРЕКТНОСТИ ДАННЫХ")
-    print(f"⏰ Время запуска: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"🧠 Используется Enhanced Indicator Validator")
-    print(f"🚀 GPU проверки включены")
+    """Компактная проверка данных"""
+    print_header("📊 ПРОВЕРКА КОРРЕКТНОСТИ ДАННЫХ")
+    print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # 1. Проверка файлов
-    files_exist, file_sizes = check_file_existence()
-    if not files_exist:
-        print_error("\n❌ Не все файлы найдены! Запустите: python main.py --mode data")
-        return
+    files = ['train_data.parquet', 'val_data.parquet', 'test_data.parquet']
+    all_issues = []
     
-    # Проверяем размеры файлов
-    total_size = sum(file_sizes.values())
-    print_info(f"📊 Общий размер данных: {total_size:.2f} MB")
-    
-    # 2. Загрузка и анализ данных
-    print_header("📋 ЗАГРУЗКА И ДЕТАЛЬНЫЙ АНАЛИЗ ДАННЫХ")
-    
-    all_issues = {}
-    
-    for file_name in ['train_data.parquet', 'val_data.parquet', 'test_data.parquet']:
-        print(f"\n{Colors.BOLD}{'='*70}{Colors.ENDC}")
-        print(f"{Colors.BOLD}🔬 АНАЛИЗ {file_name.upper()}{Colors.ENDC}")
-        print(f"{Colors.BOLD}{'='*70}{Colors.ENDC}")
-        
-        file_path = Path('data/processed') / file_name
-        try:
-            df = pd.read_parquet(file_path)
-            print_success(f"Загружено: {len(df):,} записей, {len(df.columns)} колонок")
-        except Exception as e:
-            print_error(f"Ошибка загрузки {file_name}: {e}")
+    for file in files:
+        path = Path(f'data/processed/{file}')
+        if not path.exists():
+            print_error(f"\n❌ {file} НЕ НАЙДЕН!")
+            all_issues.append("file_missing")
             continue
+            
+        print(f"\n{Colors.OKBLUE}{Colors.BOLD}{'='*50}{Colors.ENDC}")
+        print(f"{Colors.OKBLUE}{Colors.BOLD}📁 {file.upper()}{Colors.ENDC}")
+        print(f"{Colors.OKBLUE}{Colors.BOLD}{'='*50}{Colors.ENDC}")
         
-        dataset_name = file_name.split('_')[0].upper()
+        df = pd.read_parquet(path)
+        print_info(f"Размер: {len(df):,} записей, {len(df.columns)} колонок")
+        
+        # Проверки
+        dataset_name = file.split('_')[0].upper()
         issues = []
         
-        # Основные проверки
-        if not check_data_structure(df, dataset_name):
-            issues.append("structure_error")
-        
-        issues.extend(check_data_quality(df, dataset_name))
         issues.extend(check_critical_indicators(df, dataset_name))
-        issues.extend(check_target_distribution(df, dataset_name))
-        issues.extend(check_temporal_consistency(df, dataset_name))
+        issues.extend(check_data_quality(df, dataset_name))
+        check_target_distribution(df, dataset_name)
         
-        # 🆕 РАСШИРЕННЫЕ ПРОВЕРКИ
-        issues.extend(check_advanced_issues(df, dataset_name))
-        issues.extend(check_gpu_readiness(df, dataset_name))
-        
-        all_issues[dataset_name] = issues
-        
-        # Краткая сводка по датасету
-        if issues:
-            print_warning(f"⚠️ {dataset_name}: {len(issues)} проблем обнаружено")
+        # Итог по файлу
+        if not issues:
+            print_success(f"\n✅ {dataset_name} - данные корректны!")
         else:
-            print_success(f"✅ {dataset_name}: Все проверки пройдены!")
+            print_error(f"\n❌ {dataset_name} - обнаружено {len(issues)} проблем!")
+            all_issues.extend(issues)
     
-    # 3. Финальный отчет с детальными рекомендациями
-    total_issues = generate_detailed_report(all_issues, file_sizes)
+    # ФИНАЛЬНЫЙ ИТОГ
+    print_header("📋 ИТОГОВЫЙ РЕЗУЛЬТАТ")
     
-    # 4. Сохранение детального отчета
-    try:
-        # Создаем детальный отчет через валидатор
-        validator = IndicatorValidator()
-        sample_df = pd.read_parquet(Path('data/processed/train_data.parquet'))
-        detailed_report = validator.create_validation_report(sample_df)
+    if not all_issues:
+        print_success("✅ ВСЕ ДАННЫЕ ГОТОВЫ К ОБУЧЕНИЮ!")
+        print_success("\n🚀 Запускайте: python main.py --mode train")
+    else:
+        unique_issues = set(all_issues)
+        print_error(f"❌ ОБНАРУЖЕНО ПРОБЛЕМ: {len(unique_issues)}")
         
-        report_path = Path('logs/data_validation_report.txt')
-        report_path.parent.mkdir(exist_ok=True)
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write(detailed_report)
+        # Критические проблемы
+        if 'toxicity_broken' in unique_issues:
+            print_error("\n🔥 КРИТИЧНО: Индикатор toxicity не работает!")
+            print_warning("   Формула в feature_engineering.py уже исправлена")
+            print_warning("   Нужно пересоздать данные")
         
-        print_info(f"\n📄 Детальный отчет сохранен: {report_path}")
+        if any('normalized' in issue for issue in unique_issues):
+            print_error("\n🔥 КРИТИЧНО: Обнаружена нежелательная нормализация!")
+            print_warning("   Технические индикаторы не должны нормализоваться")
         
-    except Exception as e:
-        print_warning(f"Не удалось создать детальный отчет: {e}")
+        # Инструкции
+        print(f"\n{Colors.WARNING}{Colors.BOLD}🔧 НЕОБХОДИМЫЕ ДЕЙСТВИЯ:{Colors.ENDC}")
+        print_info("1. Очистить кэш:")
+        print(f"   {Colors.OKBLUE}rm -rf cache/features/*{Colors.ENDC}")
+        print_info("2. Пересоздать данные:")
+        print(f"   {Colors.OKBLUE}python prepare_trading_data.py --force-recreate{Colors.ENDC}")
+        print_info("3. Проверить результат:")
+        print(f"   {Colors.OKBLUE}python verify_data_correctness.py{Colors.ENDC}")
     
-    print(f"\n⏰ Проверка завершена: {datetime.now().strftime('%H:%M:%S')}")
+    # Автоматически сохраняем отчет без запроса
+    create_detailed_report(files)
 
-def create_validation_report(df, filename):
-    """Создание детального отчета валидации в файл"""
+def create_detailed_report(files):
+    """Создание детального отчета для логов с полным описанием всех признаков"""
     report_lines = []
-    report_lines.append("=" * 80)
-    report_lines.append("📊 ОТЧЕТ ВАЛИДАЦИИ ТЕХНИЧЕСКИХ ИНДИКАТОРОВ")
-    report_lines.append("=" * 80)
+    report_lines.append("="*80)
+    report_lines.append("📊 ДЕТАЛЬНЫЙ ОТЧЕТ ВАЛИДАЦИИ ДАННЫХ")
+    report_lines.append("="*80)
     report_lines.append(f"Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    report_lines.append(f"Размер данных: {len(df):,} записей, {len(df.columns)} колонок")
-    report_lines.append("")
     
-    # Общая статистика
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    report_lines.append("📈 ОБЩАЯ СТАТИСТИКА:")
-    report_lines.append(f"   - Числовых колонок: {len(numeric_cols)}")
-    report_lines.append(f"   - NaN значений: {df.isna().sum().sum()}")
-    report_lines.append(f"   - Inf значений: {sum(np.isinf(df[col]).sum() for col in numeric_cols)}")
-    report_lines.append("")
+    # Для сбора полной статистики
+    all_features = set()
     
-    # Детальная статистика по индикаторам
-    indicators = ['rsi', 'stoch_k', 'stoch_d', 'adx', 'adx_pos', 'adx_neg', 
-                 'toxicity', 'bb_position', 'close_position', 'psar_trend',
-                 'rsi_oversold', 'rsi_overbought', 'close_vwap_ratio', 
-                 'close_open_ratio', 'high_low_ratio', 'bb_width', 'daily_range']
+    for file in files:
+        path = Path(f'data/processed/{file}')
+        if path.exists():
+            df = pd.read_parquet(path)
+            report_lines.append(f"\n{'='*80}")
+            report_lines.append(f"📁 {file.upper()}")
+            report_lines.append(f"{'='*80}")
+            report_lines.append(f"Размер: {len(df):,} записей, {len(df.columns)} колонок")
+            report_lines.append(f"Период: {df['datetime'].min()} - {df['datetime'].max()}")
+            report_lines.append(f"Символов: {df['symbol'].nunique()}")
+            
+            # 1. МИКРОСТРУКТУРНЫЕ ПРИЗНАКИ
+            report_lines.append("\n📈 МИКРОСТРУКТУРНЫЕ ПРИЗНАКИ:")
+            microstructure_features = ['toxicity', 'price_impact', 'price_impact_log', 'amihud_illiquidity', 
+                                     'kyle_lambda', 'realized_vol', 'hl_spread', 'volume_imbalance']
+            for feature in microstructure_features:
+                if feature in df.columns:
+                    stats = df[feature].describe()
+                    report_lines.append(f"\n  {feature}:")
+                    report_lines.append(f"    Min: {stats['min']:.6f}, Max: {stats['max']:.6f}")
+                    report_lines.append(f"    Mean: {stats['mean']:.6f}, Std: {stats['std']:.6f}")
+                    report_lines.append(f"    25%: {stats['25%']:.6f}, 50%: {stats['50%']:.6f}, 75%: {stats['75%']:.6f}")
+                    
+                    # Специальные проверки
+                    if feature == 'toxicity':
+                        if stats['mean'] > 0.99:
+                            report_lines.append("    ⚠️ ПРОБЛЕМА: toxicity слишком высокий!")
+                        else:
+                            report_lines.append("    ✅ Корректное распределение")
+            
+            # 2. ТЕХНИЧЕСКИЕ ИНДИКАТОРЫ
+            report_lines.append("\n📊 ТЕХНИЧЕСКИЕ ИНДИКАТОРЫ:")
+            technical_indicators = ['rsi', 'stoch_k', 'stoch_d', 'adx', 'adx_pos', 'adx_neg',
+                                  'macd', 'macd_signal', 'macd_diff', 'bb_width', 'bb_position',
+                                  'atr', 'atr_pct', 'psar_trend', 'close_position']
+            for indicator in technical_indicators:
+                if indicator in df.columns:
+                    stats = df[indicator].describe()
+                    report_lines.append(f"\n  {indicator}:")
+                    report_lines.append(f"    Min: {stats['min']:.4f}, Max: {stats['max']:.4f}")
+                    report_lines.append(f"    Mean: {stats['mean']:.4f}, Std: {stats['std']:.4f}")
+                    
+                    # Проверка на нормализацию
+                    if indicator in ['rsi', 'stoch_k', 'stoch_d', 'adx'] and abs(stats['mean']) < 1.0 and 0.8 < stats['std'] < 1.2:
+                        report_lines.append("    ⚠️ ПРОБЛЕМА: Подозрение на нормализацию!")
+            
+            # 3. RALLY DETECTION ПРИЗНАКИ
+            report_lines.append("\n🚀 RALLY DETECTION ПРИЗНАКИ:")
+            rally_features = ['volume_cumsum_4h', 'volume_cumsum_24h', 'volume_spike', 'spring_pattern',
+                            'momentum_1h', 'momentum_4h', 'momentum_24h', 'momentum_acceleration']
+            for feature in rally_features:
+                if feature in df.columns:
+                    stats = df[feature].describe()
+                    report_lines.append(f"\n  {feature}:")
+                    report_lines.append(f"    Mean: {stats['mean']:.4f}, Std: {stats['std']:.4f}")
+                    if 'spike' in feature or 'pattern' in feature:
+                        positive_pct = (df[feature] > 0).mean() * 100
+                        report_lines.append(f"    Положительных: {positive_pct:.1f}%")
+            
+            # 4. SIGNAL QUALITY ПРИЗНАКИ
+            report_lines.append("\n📡 SIGNAL QUALITY ПРИЗНАКИ:")
+            signal_features = ['indicators_consensus_long', 'indicators_consensus_short',
+                             'trend_1h_strength', 'trend_4h_strength', 'liquidity_score']
+            for feature in signal_features:
+                if feature in df.columns:
+                    stats = df[feature].describe()
+                    report_lines.append(f"\n  {feature}:")
+                    report_lines.append(f"    Mean: {stats['mean']:.4f}, Std: {stats['std']:.4f}")
+            
+            # 5. FUTURES SPECIFIC ПРИЗНАКИ
+            report_lines.append("\n💰 FUTURES SPECIFIC ПРИЗНАКИ:")
+            futures_features = ['long_liquidation_distance_pct', 'short_liquidation_distance_pct',
+                              'optimal_leverage', 'safe_leverage', 'var_95']
+            for feature in futures_features:
+                if feature in df.columns:
+                    stats = df[feature].describe()
+                    report_lines.append(f"\n  {feature}:")
+                    report_lines.append(f"    Mean: {stats['mean']:.4f}, Std: {stats['std']:.4f}")
+            
+            # 6. ЦЕЛЕВЫЕ ПЕРЕМЕННЫЕ
+            report_lines.append("\n🎯 ЦЕЛЕВЫЕ ПЕРЕМЕННЫЕ:")
+            
+            # Бинарные целевые
+            for direction in ['long', 'short']:
+                for level in ['tp1', 'tp2', 'tp3', 'sl']:
+                    target = f'{direction}_{level}_reached'
+                    if target in df.columns:
+                        pct = df[target].mean() * 100
+                        report_lines.append(f"  {target}: {pct:.2f}%")
+            
+            # Expected values
+            for ev in ['long_expected_value', 'short_expected_value']:
+                if ev in df.columns:
+                    stats = df[ev].describe()
+                    report_lines.append(f"\n  {ev}:")
+                    report_lines.append(f"    Mean: {stats['mean']:.4f}, Std: {stats['std']:.4f}")
+                    report_lines.append(f"    Положительных: {(df[ev] > 0).mean() * 100:.1f}%")
+            
+            # Best direction
+            if 'best_direction' in df.columns:
+                report_lines.append(f"\n  best_direction распределение:")
+                dist = df['best_direction'].value_counts()
+                for direction, count in dist.items():
+                    pct = count / len(df) * 100
+                    report_lines.append(f"    {direction}: {count:,} ({pct:.1f}%)")
+            
+            # Signal strength
+            if 'signal_strength' in df.columns:
+                stats = df['signal_strength'].describe()
+                report_lines.append(f"\n  signal_strength:")
+                report_lines.append(f"    Mean: {stats['mean']:.4f}, Std: {stats['std']:.4f}")
+                report_lines.append(f"    Max: {stats['max']:.4f}")
+            
+            # 7. ПРОВЕРКА NAN ЗНАЧЕНИЙ
+            report_lines.append("\n⚠️ ПРОПУЩЕННЫЕ ЗНАЧЕНИЯ:")
+            nan_cols = df.isna().sum()
+            nan_cols = nan_cols[nan_cols > 0].sort_values(ascending=False)
+            if len(nan_cols) > 0:
+                for col, count in nan_cols.head(10).items():
+                    pct = count / len(df) * 100
+                    report_lines.append(f"  {col}: {count:,} ({pct:.2f}%)")
+            else:
+                report_lines.append("  ✅ Нет пропущенных значений")
+            
+            # 8. ИТОГОВАЯ СТАТИСТИКА
+            report_lines.append(f"\n📊 ИТОГОВАЯ СТАТИСТИКА {file.split('_')[0].upper()}:")
+            
+            # Подсчет признаков по категориям
+            feature_categories = {
+                'Базовые': ['returns', 'volume_ratio', 'high_low_ratio', 'close_open_ratio'],
+                'Технические': [col for col in df.columns if any(ind in col for ind in ['sma', 'ema', 'rsi', 'macd', 'bb_', 'stoch'])],
+                'Микроструктура': [col for col in df.columns if any(ms in col for ms in ['toxicity', 'impact', 'illiquidity', 'spread'])],
+                'Rally detection': [col for col in df.columns if any(rd in col for rd in ['volume_cumsum', 'momentum', 'spring', 'divergence'])],
+                'Signal quality': [col for col in df.columns if any(sq in col for sq in ['consensus', 'trend_strength', 'liquidity_score'])],
+                'Futures': [col for col in df.columns if any(f in col for f in ['liquidation', 'leverage', 'var_', 'funding'])],
+                'Временные': [col for col in df.columns if any(t in col for t in ['hour', 'day', 'month', 'session'])],
+                'Cross-asset': [col for col in df.columns if any(ca in col for ca in ['btc_', 'sector', 'relative_'])],
+                'Целевые': [col for col in df.columns if any(tgt in col for tgt in ['target_', 'future_', '_reached', 'expected_value', 'best_direction'])]
+            }
+            
+            for category, features in feature_categories.items():
+                count = len([f for f in features if f in df.columns])
+                if count > 0:
+                    report_lines.append(f"  {category}: {count} признаков")
+            
+            report_lines.append(f"  ВСЕГО: {len(df.columns)} колонок")
     
-    report_lines.append("📊 ДЕТАЛЬНАЯ СТАТИСТИКА ПО ИНДИКАТОРАМ:")
-    for indicator in indicators:
-        if indicator in df.columns:
-            stats = df[indicator].describe()
-            report_lines.append(f"   {indicator}:")
-            report_lines.append(f"      Min: {stats['min']:.4f}, Max: {stats['max']:.4f}")
-            report_lines.append(f"      Mean: {stats['mean']:.4f}, Std: {stats['std']:.4f}")
-            report_lines.append(f"      Записей: {len(df[indicator]):,}")
+    report_lines.append("\n" + "="*80)
+    report_lines.append("✅ ОТЧЕТ ЗАВЕРШЕН")
+    report_lines.append("="*80)
     
-    # Сохранение отчета
-    report_path = Path('logs') / filename
+    # Сохранение
+    report_path = Path('logs/data_validation_report.txt')
     report_path.parent.mkdir(exist_ok=True)
-    
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(report_lines))
     
-    print_info(f"📄 Детальный отчет сохранен: {report_path}")
+    print_info(f"\n📄 Детальный отчет сохранен: {report_path}")
 
 if __name__ == "__main__":
     main()

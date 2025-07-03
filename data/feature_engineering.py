@@ -339,14 +339,15 @@ class FeatureEngineer:
         # Ценовое воздействие - улучшенная формула
         # ИСПРАВЛЕНО: Используем dollar volume для более точной оценки
         df['dollar_volume'] = df['volume'] * df['close']
-        # ИСПРАВЛЕНО: корректный расчёт ценового воздействия через отношение
-        # изменения цены к ликвидности. Большие объёмы должны уменьшать
-        # значение price_impact, поэтому используем деление, а не умножение.
+        # ИСПРАВЛЕНО v3: Масштабируем price_impact для криптовалют
+        # где dollar_volume может быть от $10K до $100M+
+        # log10($10K) ≈ 4, log10($1M) ≈ 6, log10($100M) ≈ 8
+        # Умножаем на 100 для получения значимых значений price_impact
         df['price_impact'] = self.safe_divide(
-            df['returns'].abs(),
-            np.sqrt(df['dollar_volume'] + 1),  # сглаживаем корнем из dollar_volume
+            df['returns'].abs() * 100,  # Умножаем на 100 для правильного масштаба
+            np.log10(df['dollar_volume'] + 100),  # log10 для правильного масштаба
             fill_value=0.0,
-            max_value=10.0,
+            max_value=0.1,  # Лимит для нового масштаба
         )
         
         # Альтернативная формула с логарифмом объема
@@ -357,13 +358,14 @@ class FeatureEngineer:
             max_value=10.0
         )
         
-        # ИСПРАВЛЕНО: Правильная формула toxicity с масштабированием
-        # Toxicity = 1 / (1 + price_impact * scaling_factor)
-        # Когда price_impact большой, toxicity маленькая (более токсичная среда)
-        # Масштабирование через коэффициент позволяет получать значения близкие к
-        # 1.0 при низком воздействии и ниже 1 при повышенной токсичности.
-        df['toxicity'] = 1 / (1 + df['price_impact'] * 100)
-        df['toxicity'] = df['toxicity'].clip(0.5, 1.0)
+        # ИСПРАВЛЕНО v3: Используем экспоненциальную формулу для toxicity
+        # toxicity = exp(-price_impact * 20)
+        # С новым масштабированием price_impact:
+        # При price_impact=0.04: toxicity≈0.45
+        # При price_impact=0.02: toxicity≈0.67
+        # При price_impact=0.01: toxicity≈0.82
+        df['toxicity'] = np.exp(-df['price_impact'] * 20)
+        df['toxicity'] = df['toxicity'].clip(0.3, 1.0)
         
         # Амихуд неликвидность
         df['amihud_illiquidity'] = self.safe_divide(
@@ -931,9 +933,10 @@ class FeatureEngineer:
             for symbol in df['symbol'].unique():
                 if symbol != 'BTCUSDT':
                     mask = df['symbol'] == symbol
+                    # ИСПРАВЛЕНО: используем min_periods для корреляции
                     df.loc[mask, 'btc_correlation'] = (
                         df.loc[mask, 'returns']
-                        .rolling(window=96)
+                        .rolling(window=96, min_periods=50)
                         .corr(df.loc[mask, 'btc_returns'])
                     )
             
@@ -942,8 +945,13 @@ class FeatureEngineer:
             # Относительная сила к BTC
             df['relative_strength_btc'] = df['close'] / df['btc_close']
             df['rs_btc_ma'] = df.groupby('symbol')['relative_strength_btc'].transform(
-                lambda x: x.rolling(20).mean()
+                lambda x: x.rolling(20, min_periods=10).mean()
             )
+            
+            # ИСПРАВЛЕНО: заполняем NaN значения для BTC-связанных признаков
+            df['btc_correlation'] = df['btc_correlation'].fillna(0.5)  # нейтральная корреляция
+            df['relative_strength_btc'] = df['relative_strength_btc'].fillna(1.0)
+            df['rs_btc_ma'] = df['rs_btc_ma'].fillna(1.0)
         else:
             # Заполняем нулями если нет данных BTC
             df['btc_close'] = 0
@@ -975,7 +983,7 @@ class FeatureEngineer:
         
         # 24-часовой моментум
         df['momentum_24h'] = df.groupby('symbol')['returns'].transform(
-            lambda x: x.rolling(96).sum()  # 96 = 24*4 (15мин интервалы)
+            lambda x: x.rolling(96, min_periods=48).sum()  # 96 = 24*4 (15мин интервалы), минимум 12 часов
         )
         df['is_momentum_leader'] = (
             df.groupby('datetime')['momentum_24h']

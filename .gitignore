@@ -206,3 +206,8 @@ trading_db_backup.sql
 # Large cache files
 cache/*.pkl
 cache/features/*.pkl
+
+# Large files
+models_saved/*.pth
+cache/*.pkl
+*.sql
