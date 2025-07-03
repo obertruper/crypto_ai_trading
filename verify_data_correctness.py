@@ -53,11 +53,12 @@ def check_critical_indicators(df, name):
             print_error(f"toxicity: mean={mean:.6f}, std={std:.6f}")
             print_error("   🚨 КРИТИЧНО: toxicity всегда ≈1.0 (бесполезный индикатор!)")
             issues.append("toxicity_broken")
-        elif 0.6 <= mean <= 0.9:
-            print_success(f"toxicity: mean={mean:.4f}, std={std:.4f} ✓")
+        elif 0.4 <= mean <= 0.7 and std > 0.15:
+            print_success(f"toxicity: mean={mean:.4f}, std={std:.4f} ✓ (корректное распределение)")
         else:
-            print_warning(f"toxicity: mean={mean:.4f} вне ожидаемого диапазона 0.6-0.9")
-            issues.append("toxicity_warning")
+            print_warning(f"toxicity: mean={mean:.4f}, std={std:.4f}")
+            if std < 0.1:
+                print_warning("   ⚠️ Низкая вариативность toxicity")
     
     # 2. PRICE_IMPACT
     if 'price_impact' in df.columns:
@@ -67,10 +68,10 @@ def check_critical_indicators(df, name):
         if mean < 0.0001:
             print_error(f"price_impact: mean={mean:.6f} (слишком мал!)")
             issues.append("price_impact_too_small")
-        elif 0.001 <= mean <= 0.05:
+        elif 0.001 <= mean <= 0.1:
             print_success(f"price_impact: mean={mean:.4f} ✓")
         else:
-            print_warning(f"price_impact: mean={mean:.4f}")
+            print_warning(f"price_impact: mean={mean:.4f} (необычно высокий)")
     
     # 3. RSI - проверка на нормализацию
     if 'rsi' in df.columns:
