@@ -339,10 +339,15 @@ class FeatureEngineer:
         # Ценовое воздействие - улучшенная формула
         # ИСПРАВЛЕНО: Используем dollar volume для более точной оценки
         df['dollar_volume'] = df['volume'] * df['close']
-        # ИСПРАВЛЕНО: рассчитываем price_impact напрямую и ограничиваем диапазон
-        df['price_impact'] = (
-            df['returns'].abs() * np.sqrt(df['dollar_volume'] + 1)
-        ).clip(0, 10)
+        # ИСПРАВЛЕНО: корректный расчёт ценового воздействия через отношение
+        # изменения цены к ликвидности. Большие объёмы должны уменьшать
+        # значение price_impact, поэтому используем деление, а не умножение.
+        df['price_impact'] = self.safe_divide(
+            df['returns'].abs(),
+            np.sqrt(df['dollar_volume'] + 1),  # сглаживаем корнем из dollar_volume
+            fill_value=0.0,
+            max_value=10.0,
+        )
         
         # Альтернативная формула с логарифмом объема
         df['price_impact_log'] = self.safe_divide(
@@ -355,7 +360,9 @@ class FeatureEngineer:
         # ИСПРАВЛЕНО: Правильная формула toxicity с масштабированием
         # Toxicity = 1 / (1 + price_impact * scaling_factor)
         # Когда price_impact большой, toxicity маленькая (более токсичная среда)
-        df['toxicity'] = 1 / (1 + df['price_impact'])
+        # Масштабирование через коэффициент позволяет получать значения близкие к
+        # 1.0 при низком воздействии и ниже 1 при повышенной токсичности.
+        df['toxicity'] = 1 / (1 + df['price_impact'] * 100)
         df['toxicity'] = df['toxicity'].clip(0.5, 1.0)
         
         # Амихуд неликвидность
