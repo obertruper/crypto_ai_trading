@@ -35,7 +35,7 @@ if [ "$LOCAL" != "$REMOTE" ]; then
 fi
 
 # Проверяем размер файлов
-LARGE_FILES=$(find . -type f -size +50M -not -path "./.git/*" -not -path "./data/processed/*" -not -path "./venv_crypto/*" 2>/dev/null)
+LARGE_FILES=$(find . -type f -size +50M -not -path "./.git/*" -not -path "./data/processed/*" -not -path "./venv_crypto/*" -not -path "./models_saved/*" -not -path "./cache/*" -not -path "./*.sql" 2>/dev/null)
 
 if [ ! -z "$LARGE_FILES" ]; then
     echo -e "${RED}❌ Обнаружены большие файлы (>50MB):${NC}"

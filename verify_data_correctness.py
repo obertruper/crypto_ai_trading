@@ -142,24 +142,47 @@ def check_ml_readiness(df, name):
     print(f"\n{Colors.BOLD}🤖 Проверки для ML {name}:{Colors.ENDC}")
     
     issues = []
-    feature_cols = [col for col in df.columns 
-                   if col not in ['id', 'symbol', 'datetime', 'timestamp', 'sector']
-                   and not col.startswith(('target_', 'future_', 'long_', 'short_', 'best_'))]
     
-    # 1. Проверка экстремальных значений
+    # Исключаем служебные и целевые колонки
+    exclude_cols = ['id', 'symbol', 'datetime', 'timestamp', 'sector']
+    target_prefixes = ('target_', 'future_', 'long_', 'short_', 'best_')
+    
+    # ИСПРАВЛЕНО: Исключаем исходные данные (цены, объемы) из проверки экстремальных значений
+    # Эти колонки могут иметь большие значения и это нормально
+    raw_data_cols = [
+        'open', 'high', 'low', 'close', 'volume', 'turnover',
+        'vwap', 'btc_close', 'dollar_volume', 'directed_volume',
+        # Скользящие средние и другие ценовые индикаторы
+        'sma_10', 'sma_20', 'sma_50', 'ema_10', 'ema_20', 'ema_50',
+        'bb_high', 'bb_low', 'bb_middle', 'psar',
+        # Локальные экстремумы
+        'local_high_20', 'local_high_50', 'local_high_100',
+        'local_low_20', 'local_low_50', 'local_low_100',
+        'daily_high', 'daily_low',
+        # Ликвидационные цены
+        'long_liquidation_price', 'short_liquidation_price'
+    ]
+    
+    feature_cols = [col for col in df.columns 
+                   if col not in exclude_cols
+                   and not col.startswith(target_prefixes)
+                   and col not in raw_data_cols]
+    
+    # 1. Проверка экстремальных значений (исключая цены и объемы)
     extreme_cols = []
     for col in feature_cols:
-        max_val = df[col].abs().max()
-        if max_val > 1000:
-            extreme_cols.append((col, max_val))
+        if df[col].dtype in ['float32', 'float64', 'int32', 'int64']:
+            max_val = df[col].abs().max()
+            if max_val > 1000:
+                extreme_cols.append((col, max_val))
     
     if extreme_cols:
-        print_error(f"Экстремальные значения (>1000) в {len(extreme_cols)} колонках!")
+        print_error(f"Экстремальные значения (>1000) в {len(extreme_cols)} признаках!")
         for col, val in sorted(extreme_cols, key=lambda x: x[1], reverse=True)[:5]:
             print_error(f"   - {col}: {val:.2e}")
         issues.append("extreme_values")
     else:
-        print_success("Нет экстремальных значений (все < 1000)")
+        print_success("Нет экстремальных значений в признаках (исключая цены/объемы)")
     
     # 2. Проверка распределения признаков
     zero_variance_cols = []

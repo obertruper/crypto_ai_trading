@@ -423,11 +423,15 @@ class FeatureEngineer:
         df['realized_vol'] = df['realized_vol_daily']
         
         # Соотношение объема к волатильности
+        # ИСПРАВЛЕНО: Используем log объема и нормализуем на средний объем
+        avg_volume = df['volume'].rolling(96).mean()
+        normalized_volume = df['volume'] / (avg_volume + 1)  # Нормализованный объем
+        
         df['volume_volatility_ratio'] = self.safe_divide(
-            df['volume'],
-            df['realized_vol'],
-            fill_value=0.0,
-            max_value=1000000.0  # Большой лимит для объемов
+            normalized_volume,
+            df['realized_vol'] * 100,  # Волатильность в процентах
+            fill_value=1.0,
+            max_value=100.0  # Разумный лимит
         )
         
         return df
@@ -546,17 +550,20 @@ class FeatureEngineer:
         
         # 6. Паттерны накопления/распределения (4 признака)
         # On-Balance Volume (OBV)
-        # ИСПРАВЛЕНО: Используем rolling window вместо cumsum для предотвращения экстремальных значений
+        # ИСПРАВЛЕНО: Используем log-трансформацию для контроля масштаба
         obv_change = df['volume'] * ((df['close'] > df['close'].shift(1)) * 2 - 1)
         
-        # Используем скользящее окно вместо накопительной суммы
-        df['obv'] = obv_change.rolling(100).sum()  # 100 периодов (25 часов)
+        # Используем скользящее окно с log-трансформацией
+        obv_raw = obv_change.rolling(100).sum()  # 100 периодов (25 часов)
+        
+        # Применяем log-трансформацию для контроля масштаба
+        df['obv'] = np.sign(obv_raw) * np.log1p(np.abs(obv_raw))
         
         # Нормализуем OBV относительно среднего объема для сравнимости между активами
         avg_volume = df['volume'].rolling(100).mean()
         df['obv_normalized'] = self.safe_divide(
             df['obv'],
-            avg_volume * 10,  # Нормализуем на 10x средний объем
+            np.log1p(avg_volume),  # Логарифмируем и средний объем
             fill_value=0.0,
             max_value=20.0
         )

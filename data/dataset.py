@@ -138,12 +138,22 @@ class TimeSeriesDataset(Dataset):
                 # Применяем log-трансформацию к объемным колонкам
                 for col in self.volume_based_cols:
                     if col in scaler_data.columns:
+                        # ИСПРАВЛЕНО: Конвертация в числовой тип перед log-трансформацией
+                        scaler_data[col] = pd.to_numeric(scaler_data[col], errors='coerce')
                         # Log трансформация с защитой от отрицательных значений
                         scaler_data[col] = np.log1p(np.clip(scaler_data[col], 0, None))
                 
                 # Клиппинг экстремальных значений перед обучением scaler
                 for col in scaler_data.columns:
                     if col not in self.ratio_cols:  # Не клиппим ratio колонки
+                        # ИСПРАВЛЕНО: Конвертация в числовой тип перед квантилями
+                        scaler_data[col] = pd.to_numeric(scaler_data[col], errors='coerce')
+                        
+                        # Пропускаем колонки с только NaN значениями
+                        if scaler_data[col].notna().sum() == 0:
+                            self.logger.warning(f"Колонка '{col}' содержит только NaN значения, пропускаем")
+                            continue
+                            
                         q99 = scaler_data[col].quantile(0.99)
                         q01 = scaler_data[col].quantile(0.01)
                         scaler_data[col] = np.clip(scaler_data[col], q01, q99)
