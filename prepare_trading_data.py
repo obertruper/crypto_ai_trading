@@ -27,7 +27,7 @@ from utils.logger import get_logger
 from tqdm import tqdm
 
 # ВАЖНО: Увеличивать при изменении логики создания признаков
-FEATURE_VERSION = "2.5"  # Исправлены: volume_volatility_ratio, OBV с log-трансформацией
+FEATURE_VERSION = "2.6"  # Исправлены: trend_1h/4h нормализованы, улучшена проверка данных
 
 
 def check_database_connection(config: dict, logger):

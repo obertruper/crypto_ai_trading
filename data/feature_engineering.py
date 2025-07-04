@@ -687,13 +687,41 @@ class FeatureEngineer:
             self.logger.info(f"    Используемые индикаторы: {', '.join(indicators_used)}")
         
         # 2. Сила тренда на старших таймфреймах (4 признака)
+        # ИСПРАВЛЕНО: Нормализуем тренды относительно цены для избежания больших значений
         # Эмулируем 1-часовой таймфрейм (4 свечи по 15 мин)
-        df['trend_1h'] = df['close'].rolling(4).mean() - df['close'].rolling(4).mean().shift(4)
-        df['trend_1h_strength'] = df['trend_1h'] / (df['atr'].rolling(4).mean() + 1e-10)
+        ma_1h = df['close'].rolling(4).mean()
+        ma_1h_prev = ma_1h.shift(4)
+        df['trend_1h'] = self.safe_divide(
+            ma_1h - ma_1h_prev,
+            ma_1h_prev,
+            fill_value=0.0,
+            max_value=0.1  # Максимум 10% изменение
+        ) * 100  # В процентах
+        
+        df['trend_1h_strength'] = self.safe_divide(
+            df['trend_1h'],
+            df['atr_pct'].rolling(4).mean() * 100,  # ATR уже в процентах
+            fill_value=0.0,
+            max_value=10.0
+        )
         
         # Эмулируем 4-часовой таймфрейм (16 свечей)
-        df['trend_4h'] = df['close'].rolling(16).mean() - df['close'].rolling(16).mean().shift(16)
-        df['trend_4h_strength'] = df['trend_4h'] / (df['atr'].rolling(16).mean() + 1e-10)
+        ma_4h = df['close'].rolling(16).mean()
+        ma_4h_prev = ma_4h.shift(16)
+        df['trend_4h'] = self.safe_divide(
+            ma_4h - ma_4h_prev,
+            ma_4h_prev,
+            fill_value=0.0,
+            max_value=0.2  # Максимум 20% изменение
+        ) * 100  # В процентах
+        
+        df['trend_4h_strength'] = self.safe_divide(
+            df['trend_4h'],
+            df['atr_pct'].rolling(16).mean() * 100,  # ATR уже в процентах
+            fill_value=0.0,
+            max_value=10.0
+        )
+        
         features_created.extend(['trend_1h', 'trend_1h_strength', 'trend_4h', 'trend_4h_strength'])
         
         if not self.disable_progress:

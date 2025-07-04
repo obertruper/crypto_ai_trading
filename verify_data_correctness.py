@@ -155,12 +155,18 @@ def check_ml_readiness(df, name):
         # Скользящие средние и другие ценовые индикаторы
         'sma_10', 'sma_20', 'sma_50', 'ema_10', 'ema_20', 'ema_50',
         'bb_high', 'bb_low', 'bb_middle', 'psar',
+        # EMA для MACD (могут быть большие для дорогих активов)
+        'ema_12', 'ema_26',
         # Локальные экстремумы
         'local_high_20', 'local_high_50', 'local_high_100',
         'local_low_20', 'local_low_50', 'local_low_100',
         'daily_high', 'daily_low',
         # Ликвидационные цены
-        'long_liquidation_price', 'short_liquidation_price'
+        'long_liquidation_price', 'short_liquidation_price',
+        # ATR в абсолютных ценах (не в процентах)
+        'atr',
+        # Тренды в абсолютных значениях
+        'trend_1h', 'trend_4h'
     ]
     
     feature_cols = [col for col in df.columns 
