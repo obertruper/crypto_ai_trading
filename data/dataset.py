@@ -10,6 +10,8 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
+from sklearn.preprocessing import RobustScaler
+import pickle
 
 from utils.logger import get_logger
 from data.constants import TRADING_TARGET_VARIABLES, SERVICE_COLUMNS, get_feature_columns
@@ -23,7 +25,10 @@ class TimeSeriesDataset(Dataset):
                  prediction_window: int = 4,
                  feature_cols: List[str] = None,
                  target_cols: List[str] = None,
-                 stride: int = 1):
+                 stride: int = 1,
+                 normalize: bool = True,
+                 scaler_path: Optional[str] = None,
+                 fit_scaler: bool = False):
         """
         Args:
             data: DataFrame с данными
@@ -60,6 +65,16 @@ class TimeSeriesDataset(Dataset):
         # Создание индексов для эффективного доступа
         self._create_indices()
         
+        # Нормализация данных
+        self.normalize = normalize
+        self.scaler = None
+        self.volume_based_cols = []
+        self.price_based_cols = []
+        self.ratio_cols = []
+        
+        if self.normalize:
+            self._setup_normalization(scaler_path, fit_scaler)
+        
         self.logger.info(f"Dataset создан: {len(self)} примеров, "
                         f"{len(self.feature_cols)} признаков, "
                         f"{len(self.target_cols)} целевых переменных")
@@ -86,6 +101,65 @@ class TimeSeriesDataset(Dataset):
                         'context_end_idx': window_indices[self.context_window - 1],
                         'target_end_idx': window_indices[-1]
                     })
+    
+    def _setup_normalization(self, scaler_path: Optional[str] = None, fit_scaler: bool = False):
+        """Настройка нормализации данных"""
+        self.logger.info("🔧 Настройка нормализации данных...")
+        
+        # Определяем типы колонок для разной нормализации
+        self.volume_based_cols = [col for col in self.feature_cols if any(
+            pattern in col.lower() for pattern in ['volume', 'turnover', 'obv', 'liquidity', 'cmf', 'mfi']
+        )]
+        
+        self.price_based_cols = [col for col in self.feature_cols if any(
+            pattern in col.lower() for pattern in ['price', 'vwap', 'high', 'low', 'open', 'close']
+        )]
+        
+        self.ratio_cols = [col for col in self.feature_cols if any(
+            pattern in col.lower() for pattern in ['ratio', 'rsi', 'stoch', 'bb_', 'pct', 'toxicity']
+        )]
+        
+        # Загрузка или создание scaler
+        if scaler_path and Path(scaler_path).exists() and not fit_scaler:
+            self.logger.info(f"📥 Загрузка scaler из {scaler_path}")
+            with open(scaler_path, 'rb') as f:
+                self.scaler = pickle.load(f)
+        else:
+            self.logger.info("🔨 Создание нового scaler...")
+            self.scaler = RobustScaler(quantile_range=(5, 95))
+            
+            if fit_scaler:
+                # Фитим scaler на тренировочных данных
+                self.logger.info("📊 Обучение scaler на данных...")
+                
+                # Подготовка данных для обучения scaler
+                scaler_data = self.data[self.feature_cols].copy()
+                
+                # Применяем log-трансформацию к объемным колонкам
+                for col in self.volume_based_cols:
+                    if col in scaler_data.columns:
+                        # Log трансформация с защитой от отрицательных значений
+                        scaler_data[col] = np.log1p(np.clip(scaler_data[col], 0, None))
+                
+                # Клиппинг экстремальных значений перед обучением scaler
+                for col in scaler_data.columns:
+                    if col not in self.ratio_cols:  # Не клиппим ratio колонки
+                        q99 = scaler_data[col].quantile(0.99)
+                        q01 = scaler_data[col].quantile(0.01)
+                        scaler_data[col] = np.clip(scaler_data[col], q01, q99)
+                
+                # Обучаем scaler
+                self.scaler.fit(scaler_data.values)
+                
+                # Сохраняем scaler если указан путь
+                if scaler_path:
+                    Path(scaler_path).parent.mkdir(parents=True, exist_ok=True)
+                    with open(scaler_path, 'wb') as f:
+                        pickle.dump(self.scaler, f)
+                    self.logger.info(f"💾 Scaler сохранен в {scaler_path}")
+        
+        self.logger.info(f"✅ Нормализация настроена: {len(self.volume_based_cols)} объемных, "
+                        f"{len(self.price_based_cols)} ценовых, {len(self.ratio_cols)} ratio колонок")
     
     def __len__(self):
         return len(self.indices)
@@ -130,7 +204,39 @@ class TimeSeriesDataset(Dataset):
         feature_values = feature_data.values
         feature_values = np.nan_to_num(feature_values, nan=0.0, posinf=0.0, neginf=0.0)
         
-        X = torch.FloatTensor(feature_values)
+        # Применяем нормализацию если включена
+        if self.normalize and self.scaler is not None:
+            # Создаем копию для нормализации
+            norm_values = feature_values.copy()
+            
+            # Применяем log-трансформацию к объемным колонкам
+            for i, col in enumerate(self.feature_cols):
+                if col in self.volume_based_cols:
+                    # Log трансформация с защитой от отрицательных значений
+                    norm_values[:, i] = np.log1p(np.clip(norm_values[:, i], 0, None))
+            
+            # Клиппинг экстремальных значений
+            for i, col in enumerate(self.feature_cols):
+                if col not in self.ratio_cols:  # Не клиппим ratio колонки
+                    # Используем квантили из обучающих данных
+                    q99 = np.percentile(norm_values[:, i], 99)
+                    q01 = np.percentile(norm_values[:, i], 1)
+                    norm_values[:, i] = np.clip(norm_values[:, i], q01, q99)
+            
+            # Применяем RobustScaler
+            try:
+                norm_values = self.scaler.transform(norm_values)
+            except Exception as e:
+                self.logger.warning(f"Ошибка при нормализации: {e}")
+                # Fallback к исходным значениям
+                norm_values = feature_values
+            
+            # Финальный клиппинг после нормализации
+            norm_values = np.clip(norm_values, -10, 10)
+            
+            X = torch.FloatTensor(norm_values)
+        else:
+            X = torch.FloatTensor(feature_values)
         
         # Обработка целевых переменных
         if len(self.target_cols) > 0:
@@ -556,6 +662,10 @@ def create_data_loaders(train_data: pd.DataFrame,
     if target_cols:
         logger.info(f"   - Целевых переменных: {len(target_cols)}")
     
+    # Получаем параметры нормализации из конфига
+    normalize = config.get('data', {}).get('normalize', True)
+    scaler_path = config.get('data', {}).get('scaler_path', 'models_saved/data_scaler.pkl')
+    
     # Создание датасетов с проверкой ошибок
     try:
         train_dataset = TradingDataset(
@@ -565,7 +675,10 @@ def create_data_loaders(train_data: pd.DataFrame,
             prediction_window=pred_window,
             feature_cols=feature_cols,
             target_cols=target_cols,
-            stride=1  # Для обучения используем все возможные окна
+            stride=1,  # Для обучения используем все возможные окна
+            normalize=normalize,
+            scaler_path=scaler_path,
+            fit_scaler=True  # Обучаем scaler на train данных
         )
         
         val_dataset = TradingDataset(
@@ -575,7 +688,10 @@ def create_data_loaders(train_data: pd.DataFrame,
             prediction_window=pred_window,
             feature_cols=feature_cols,
             target_cols=target_cols,
-            stride=4  # Для валидации можем использовать больший stride
+            stride=4,  # Для валидации можем использовать больший stride
+            normalize=normalize,
+            scaler_path=scaler_path,
+            fit_scaler=False  # Используем уже обученный scaler
         )
         
         test_dataset = TradingDataset(
@@ -585,7 +701,10 @@ def create_data_loaders(train_data: pd.DataFrame,
             prediction_window=pred_window,
             feature_cols=feature_cols,
             target_cols=target_cols,
-            stride=4
+            stride=4,
+            normalize=normalize,
+            scaler_path=scaler_path,
+            fit_scaler=False  # Используем уже обученный scaler
         )
     except Exception as e:
         logger.error(f"❌ Ошибка при создании датасетов: {e}")

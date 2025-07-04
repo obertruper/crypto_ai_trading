@@ -273,9 +273,25 @@ def prepare_features_for_trading(config: dict, logger, force_recreate: bool = Fa
     val_data = processed_data.iloc[train_end_idx:val_end_idx].copy()
     test_data = processed_data.iloc[val_end_idx:].copy()
     
-    # ИСПРАВЛЕНО: Убрана дублирующая нормализация - нормализация уже выполнена в feature_engineer
-    # Данные уже нормализованы в process_symbol_features -> create_features
-    logger.info("📏 Данные уже нормализованы в process_symbol_features")
+    # ИСПРАВЛЕНО: Добавляем нормализацию данных перед сохранением
+    # Нормализация будет применяться в dataset.py при загрузке
+    logger.info("📏 Настройка нормализации данных...")
+    
+    # Импортируем необходимые модули для нормализации
+    from data.dataset import TimeSeriesDataset
+    
+    # Создаем временный датасет для обучения scaler
+    temp_dataset = TimeSeriesDataset(
+        data=train_data,
+        context_window=config['model']['context_window'],
+        prediction_window=config['model']['target_window'],
+        stride=config['model']['stride'],
+        normalize=True,
+        scaler_path='models_saved/data_scaler.pkl',
+        fit_scaler=True  # Обучаем scaler на train данных
+    )
+    
+    logger.info("✅ Scaler обучен и сохранен в models_saved/data_scaler.pkl")
     
     # Статистика по данным
     logger.info("\n📊 СТАТИСТИКА ПОДГОТОВЛЕННЫХ ДАННЫХ:")

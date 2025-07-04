@@ -148,11 +148,23 @@ class MetricsCalculator:
     def _compute_single_task_metrics(self, 
                                    predictions: np.ndarray,
                                    targets: np.ndarray) -> Dict[str, float]:
-        """Расчет метрик для одной задачи"""
+        """Расчет метрик для одной задачи (включая многомерные выходы)"""
         metrics = {}
         
-        # Обработка 3D тензоров (batch, time, features)
-        if predictions.ndim == 3:
+        # Обработка различных размерностей для торговой модели с 36 выходами
+        if predictions.ndim == 2 and targets.ndim == 3:
+            # predictions: (batch, 36), targets: (batch, 1, 36) или (batch, time, 36)
+            if targets.shape[1] == 1:
+                # Убираем лишнее измерение
+                targets = targets.squeeze(1)
+            else:
+                # Берем последний временной шаг если time > 1
+                targets = targets[:, -1, :]
+        elif predictions.ndim == 3 and targets.ndim == 2:
+            # predictions: (batch, time, features), targets: (batch, features)
+            # Берем последний временной шаг из predictions
+            predictions = predictions[:, -1, :]
+        elif predictions.ndim == 3:
             # Reshape to 2D для вычисления метрик
             batch_size, time_steps, n_features = predictions.shape
             predictions = predictions.reshape(-1, n_features)
@@ -191,9 +203,55 @@ class MetricsCalculator:
         # Получаем актуальное количество признаков после всех обработок
         n_features = predictions.shape[1] if predictions.ndim > 1 else 1
         
-        # Вычисляем метрики для каждого признака
-        if predictions.ndim > 1 and n_features > 1:
-            for i in range(n_features):
+        # Специальная обработка для торговой модели с 36 выходами
+        if predictions.ndim == 2 and n_features == 36:
+            # Названия для 36 целевых переменных
+            target_names = [
+                'future_return_1', 'future_return_2', 'future_return_3', 'future_return_4',
+                'long_tp1_hit', 'long_tp2_hit', 'long_tp3_hit', 'long_sl_hit',
+                'short_tp1_hit', 'short_tp2_hit', 'short_tp3_hit', 'short_sl_hit',
+                'long_tp1_time', 'long_tp2_time', 'long_tp3_time', 'long_sl_time',
+                'short_tp1_time', 'short_tp2_time', 'short_tp3_time', 'short_sl_time',
+                'long_tp1_reached', 'long_tp2_reached', 'long_tp3_reached', 'long_sl_reached',
+                'short_tp1_reached', 'short_tp2_reached', 'short_tp3_reached', 'short_sl_reached',
+                'long_optimal_entry', 'long_optimal_exit', 'short_optimal_entry', 'short_optimal_exit',
+                'long_max_profit', 'short_max_profit', 'long_max_loss', 'short_max_loss'
+            ]
+            
+            # Вычисляем метрики для групп переменных
+            # Future returns (регрессия)
+            future_returns_idx = list(range(4))
+            fr_pred = predictions[:, future_returns_idx]
+            fr_target = targets[:, future_returns_idx]
+            metrics['future_returns_mse'] = mean_squared_error(fr_target.flatten(), fr_pred.flatten())
+            metrics['future_returns_mae'] = mean_absolute_error(fr_target.flatten(), fr_pred.flatten())
+            
+            # Hit вероятности (бинарная классификация)
+            hit_idx = list(range(4, 12))
+            hit_pred = predictions[:, hit_idx]
+            hit_target = targets[:, hit_idx]
+            hit_pred_binary = (hit_pred > 0.5).astype(int)
+            hit_target_binary = hit_target.astype(int)
+            metrics['hit_accuracy'] = accuracy_score(hit_target_binary.flatten(), hit_pred_binary.flatten())
+            
+            # Time predictions (регрессия)
+            time_idx = list(range(12, 20))
+            time_pred = predictions[:, time_idx]
+            time_target = targets[:, time_idx]
+            # Только для ненулевых значений
+            mask = time_target > 0
+            if mask.any():
+                metrics['time_mae'] = mean_absolute_error(time_target[mask], time_pred[mask])
+            
+            # Общие метрики
+            metrics['overall_mse'] = mean_squared_error(targets.flatten(), predictions.flatten())
+            metrics['overall_mae'] = mean_absolute_error(targets.flatten(), predictions.flatten())
+            
+            return metrics
+            
+        # Вычисляем метрики для каждого признака (старая логика)
+        elif predictions.ndim > 1 and n_features > 1:
+            for i in range(min(n_features, 5)):  # Ограничиваем для производительности
                 pred_i = predictions[:, i]
                 target_i = targets[:, i]
                 
@@ -204,8 +262,8 @@ class MetricsCalculator:
                 
             # Общие метрики
             try:
-                metrics['mse'] = mean_squared_error(targets, predictions)
-                metrics['mae'] = mean_absolute_error(targets, predictions)
+                metrics['mse'] = mean_squared_error(targets.flatten(), predictions.flatten())
+                metrics['mae'] = mean_absolute_error(targets.flatten(), predictions.flatten())
             except:
                 metrics['mse'] = np.nan
                 metrics['mae'] = np.nan

@@ -137,6 +137,92 @@ def check_data_quality(df, name):
     
     return issues
 
+def check_ml_readiness(df, name):
+    """Проверка готовности данных для ML"""
+    print(f"\n{Colors.BOLD}🤖 Проверки для ML {name}:{Colors.ENDC}")
+    
+    issues = []
+    feature_cols = [col for col in df.columns 
+                   if col not in ['id', 'symbol', 'datetime', 'timestamp', 'sector']
+                   and not col.startswith(('target_', 'future_', 'long_', 'short_', 'best_'))]
+    
+    # 1. Проверка экстремальных значений
+    extreme_cols = []
+    for col in feature_cols:
+        max_val = df[col].abs().max()
+        if max_val > 1000:
+            extreme_cols.append((col, max_val))
+    
+    if extreme_cols:
+        print_error(f"Экстремальные значения (>1000) в {len(extreme_cols)} колонках!")
+        for col, val in sorted(extreme_cols, key=lambda x: x[1], reverse=True)[:5]:
+            print_error(f"   - {col}: {val:.2e}")
+        issues.append("extreme_values")
+    else:
+        print_success("Нет экстремальных значений (все < 1000)")
+    
+    # 2. Проверка распределения признаков
+    zero_variance_cols = []
+    for col in feature_cols[:50]:  # Проверяем первые 50
+        std = df[col].std()
+        if std < 1e-6:
+            zero_variance_cols.append(col)
+    
+    if zero_variance_cols:
+        print_warning(f"Нулевая дисперсия в {len(zero_variance_cols)} колонках")
+        issues.append("zero_variance")
+    else:
+        print_success("Все признаки имеют достаточную дисперсию")
+    
+    # 3. Проверка корреляций между признаками
+    if len(feature_cols) > 10:
+        corr_matrix = df[feature_cols[:20]].corr().abs()
+        high_corr_pairs = []
+        for i in range(len(corr_matrix)):
+            for j in range(i+1, len(corr_matrix)):
+                if corr_matrix.iloc[i, j] > 0.95:
+                    high_corr_pairs.append((corr_matrix.index[i], corr_matrix.columns[j], corr_matrix.iloc[i, j]))
+        
+        if high_corr_pairs:
+            print_warning(f"Высокая корреляция (>0.95) между {len(high_corr_pairs)} парами признаков")
+        else:
+            print_success("Нет сильно коррелированных признаков")
+    
+    # 4. Проверка баланса целевых переменных
+    for direction in ['long', 'short']:
+        tp1_col = f'{direction}_tp1_reached'
+        if tp1_col in df.columns:
+            positive_pct = df[tp1_col].mean() * 100
+            if positive_pct < 5 or positive_pct > 95:
+                print_error(f"{tp1_col}: {positive_pct:.1f}% - сильный дисбаланс!")
+                issues.append("target_imbalance")
+    
+    # 5. Проверка типов данных
+    non_numeric = []
+    for col in feature_cols:
+        if df[col].dtype == 'object':
+            non_numeric.append(col)
+    
+    if non_numeric:
+        print_error(f"Не числовые типы в {len(non_numeric)} колонках: {non_numeric[:5]}")
+        issues.append("non_numeric_features")
+    else:
+        print_success("Все признаки имеют числовой тип")
+    
+    # 6. Проверка inf значений
+    inf_cols = []
+    for col in feature_cols:
+        if np.isinf(df[col]).any():
+            inf_cols.append(col)
+    
+    if inf_cols:
+        print_error(f"Бесконечные значения в {len(inf_cols)} колонках: {inf_cols[:5]}")
+        issues.append("inf_values")
+    else:
+        print_success("Нет бесконечных значений")
+    
+    return issues
+
 def main():
     """Компактная проверка данных"""
     print_header("📊 ПРОВЕРКА КОРРЕКТНОСТИ ДАННЫХ")
@@ -166,6 +252,7 @@ def main():
         issues.extend(check_critical_indicators(df, dataset_name))
         issues.extend(check_data_quality(df, dataset_name))
         check_target_distribution(df, dataset_name)
+        issues.extend(check_ml_readiness(df, dataset_name))
         
         # Итог по файлу
         if not issues:
@@ -193,6 +280,14 @@ def main():
         if any('normalized' in issue for issue in unique_issues):
             print_error("\n🔥 КРИТИЧНО: Обнаружена нежелательная нормализация!")
             print_warning("   Технические индикаторы не должны нормализоваться")
+        
+        if 'extreme_values' in unique_issues:
+            print_error("\n🔥 КРИТИЧНО: Экстремальные значения в признаках!")
+            print_warning("   Требуется нормализация данных")
+        
+        if 'target_imbalance' in unique_issues:
+            print_warning("\n⚠️ ВНИМАНИЕ: Дисбаланс в целевых переменных!")
+            print_info("   Может потребоваться балансировка классов")
         
         # Инструкции
         print(f"\n{Colors.WARNING}{Colors.BOLD}🔧 НЕОБХОДИМЫЕ ДЕЙСТВИЯ:{Colors.ENDC}")

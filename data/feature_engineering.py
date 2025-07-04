@@ -115,6 +115,15 @@ class FeatureEngineer:
     
     def _validate_data(self, df: pd.DataFrame):
         """Валидация целостности данных"""
+        # ИСПРАВЛЕНО: Конвертация числовых колонок в правильные типы
+        numeric_columns = ['open', 'high', 'low', 'close', 'volume', 'turnover']
+        for col in numeric_columns:
+            if col in df.columns:
+                # Конвертируем в числовой тип, заменяя ошибки на NaN
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                # Заполняем NaN значения предыдущими значениями
+                df[col] = df[col].ffill().bfill()
+        
         # Проверка на отсутствующие значения
         if df.isnull().any().any():
             if not self.disable_progress:
@@ -431,12 +440,24 @@ class FeatureEngineer:
         features_created = []
         
         # 1. Накопленный объем за разные периоды (8 признаков)
+        # ИСПРАВЛЕНО: Используем log-трансформацию для больших объемов
         for hours in [4, 8, 12, 24]:
             periods = hours * 4  # 15-минутные свечи
             col_cumsum = f'volume_cumsum_{hours}h'
             col_ratio = f'volume_cumsum_{hours}h_ratio'
-            df[col_cumsum] = df['volume'].rolling(periods).sum()
-            df[col_ratio] = df[col_cumsum] / df['volume'].rolling(periods * 4).mean()
+            
+            # Используем log1p для безопасной трансформации
+            # log1p(x) = log(1 + x), безопасен для x=0
+            df[col_cumsum] = np.log1p(df['volume'].rolling(periods).sum())
+            
+            # Отношение к среднему объему за более длинный период
+            avg_volume_long = df['volume'].rolling(periods * 4).mean()
+            df[col_ratio] = self.safe_divide(
+                df['volume'].rolling(periods).sum(),
+                avg_volume_long * periods,  # Нормализуем на ожидаемую сумму
+                fill_value=1.0,
+                max_value=10.0  # Ограничиваем экстремальные всплески
+            )
             features_created.extend([col_cumsum, col_ratio])
         
         if not self.disable_progress:
@@ -525,19 +546,32 @@ class FeatureEngineer:
         
         # 6. Паттерны накопления/распределения (4 признака)
         # On-Balance Volume (OBV)
-        obv = (df['volume'] * ((df['close'] > df['close'].shift(1)) * 2 - 1)).cumsum()
-        df['obv'] = obv
-        df['obv_ema'] = obv.ewm(span=20, adjust=False).mean()
+        # ИСПРАВЛЕНО: Используем rolling window вместо cumsum для предотвращения экстремальных значений
+        obv_change = df['volume'] * ((df['close'] > df['close'].shift(1)) * 2 - 1)
+        
+        # Используем скользящее окно вместо накопительной суммы
+        df['obv'] = obv_change.rolling(100).sum()  # 100 периодов (25 часов)
+        
+        # Нормализуем OBV относительно среднего объема для сравнимости между активами
+        avg_volume = df['volume'].rolling(100).mean()
+        df['obv_normalized'] = self.safe_divide(
+            df['obv'],
+            avg_volume * 10,  # Нормализуем на 10x средний объем
+            fill_value=0.0,
+            max_value=20.0
+        )
+        
+        df['obv_ema'] = df['obv'].ewm(span=20, adjust=False).mean()
         df['obv_divergence'] = df['obv'] - df['obv_ema']
         
         # Chaikin Money Flow
         mfm = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low'] + 1e-10)
         mfv = mfm * df['volume']
         df['cmf'] = mfv.rolling(20).sum() / df['volume'].rolling(20).sum()
-        features_created.extend(['obv', 'obv_ema', 'obv_divergence', 'cmf'])
+        features_created.extend(['obv', 'obv_normalized', 'obv_ema', 'obv_divergence', 'cmf'])
         
         if not self.disable_progress:
-            self.logger.info(f"  ✓ Паттерны накопления/распределения: создано 4 признака")
+            self.logger.info(f"  ✓ Паттерны накопления/распределения: создано 5 признаков")
         
         # 7. Momentum и ускорение (4 признака)
         # Используем groupby для правильного расчета по символам
@@ -715,7 +749,20 @@ class FeatureEngineer:
         # Средний спред и объем за последний час
         # Используем high-low спред вместо bid-ask
         df['hl_spread'] = (df['high'] - df['low']) / df['close']
-        df['liquidity_score'] = df['volume'].rolling(4).mean() / (df['hl_spread'].rolling(4).mean() + 1e-10)
+        
+        # ИСПРАВЛЕНО: Безопасный расчет liquidity_score с ограничениями
+        hl_spread_mean = df['hl_spread'].rolling(4).mean()
+        volume_mean = df['volume'].rolling(4).mean()
+        
+        # Клиппинг hl_spread для избежания деления на очень малые числа
+        # Минимальный спред 0.01% (0.0001) для стейблкоинов
+        hl_spread_clipped = np.clip(hl_spread_mean, 0.0001, 1.0)
+        
+        # Используем log-трансформацию для контроля масштаба
+        # liquidity_score теперь в диапазоне примерно [0, 20]
+        df['liquidity_score'] = np.log1p(volume_mean / (hl_spread_clipped * 1000))
+        
+        # Ранжирование по ликвидности
         df['liquidity_rank'] = df.groupby('datetime')['liquidity_score'].rank(pct=True)
         features_created.extend(['hl_spread', 'liquidity_score', 'liquidity_rank'])
         
@@ -1694,6 +1741,16 @@ class FeatureEngineer:
                             self.logger.warning(f"Колонка '{col}' не является числовой или отсутствует, пропускаем")
                 
                 for col in numeric_feature_cols:
+                    # ИСПРАВЛЕНО: Дополнительная проверка и конвертация перед квантилями
+                    # Конвертируем в числовой тип на случай если есть строки
+                    train_cleaned[col] = pd.to_numeric(train_cleaned[col], errors='coerce')
+                    
+                    # Пропускаем колонки с только NaN значениями
+                    if train_cleaned[col].notna().sum() == 0:
+                        if not self.disable_progress:
+                            self.logger.warning(f"Колонка '{col}' содержит только NaN значения, пропускаем")
+                        continue
+                    
                     # Клиппинг экстремальных значений
                     q01 = train_cleaned[col].quantile(0.01)
                     q99 = train_cleaned[col].quantile(0.99)
@@ -1713,6 +1770,12 @@ class FeatureEngineer:
                     train_to_scale = train_data.loc[train_valid_mask, numeric_feature_cols].copy()
                     # Применяем ту же очистку
                     for col in numeric_feature_cols:
+                        # ИСПРАВЛЕНО: Конвертация в числовой тип
+                        train_to_scale[col] = pd.to_numeric(train_to_scale[col], errors='coerce')
+                        
+                        if train_to_scale[col].notna().sum() == 0:
+                            continue
+                            
                         q01 = train_cleaned[col].quantile(0.01) if col in train_cleaned.columns else train_to_scale[col].quantile(0.01)
                         q99 = train_cleaned[col].quantile(0.99) if col in train_cleaned.columns else train_to_scale[col].quantile(0.99)
                         train_to_scale[col] = train_to_scale[col].clip(lower=q01, upper=q99)
@@ -1727,6 +1790,12 @@ class FeatureEngineer:
                     val_to_scale = val_data.loc[val_valid_mask, numeric_feature_cols].copy()
                     # Применяем ту же очистку используя статистики из train
                     for col in numeric_feature_cols:
+                        # ИСПРАВЛЕНО: Конвертация в числовой тип
+                        val_to_scale[col] = pd.to_numeric(val_to_scale[col], errors='coerce')
+                        
+                        if val_to_scale[col].notna().sum() == 0:
+                            continue
+                            
                         q01 = train_cleaned[col].quantile(0.01) if col in train_cleaned.columns else val_to_scale[col].quantile(0.01)
                         q99 = train_cleaned[col].quantile(0.99) if col in train_cleaned.columns else val_to_scale[col].quantile(0.99)
                         val_to_scale[col] = val_to_scale[col].clip(lower=q01, upper=q99)
@@ -1741,6 +1810,12 @@ class FeatureEngineer:
                     test_to_scale = test_data.loc[test_valid_mask, numeric_feature_cols].copy()
                     # Применяем ту же очистку используя статистики из train
                     for col in numeric_feature_cols:
+                        # ИСПРАВЛЕНО: Конвертация в числовой тип
+                        test_to_scale[col] = pd.to_numeric(test_to_scale[col], errors='coerce')
+                        
+                        if test_to_scale[col].notna().sum() == 0:
+                            continue
+                            
                         q01 = train_cleaned[col].quantile(0.01) if col in train_cleaned.columns else test_to_scale[col].quantile(0.01)
                         q99 = train_cleaned[col].quantile(0.99) if col in train_cleaned.columns else test_to_scale[col].quantile(0.99)
                         test_to_scale[col] = test_to_scale[col].clip(lower=q01, upper=q99)

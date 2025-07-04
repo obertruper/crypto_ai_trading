@@ -182,7 +182,7 @@ model:
   patch_len: 16  # Увеличен размер патча
   use_amp: true      # Mixed Precision для RTX 5090
   amp_dtype: float16  # FP16 для совместимости с sm_120
-  compile_model: true  # torch.compile для ускорения (требует PyTorch 2.0+)
+  compile_model: false  # torch.compile отключен для совместимости
   use_tf32: true  # TensorFloat-32 для ускорения
   # Целевые переменные для торговой модели (36 переменных)
   target_variables:
@@ -257,8 +257,8 @@ performance:
   data_parallel: true
   device: cuda  # RTX 5090 с 31.4 GB памяти
   mixed_precision: true  # Включено для RTX 5090
-  num_workers: 0  # ИСПРАВЛЕНО: отключаем мультипроцессинг для GPU обучения
-  persistent_workers: false  # ИСПРАВЛЕНО: отключаем при num_workers=0
+  num_workers: 4  # Оптимизировано для RTX 5090 - используем 4 воркера для загрузки данных
+  persistent_workers: true  # Включаем для эффективности при num_workers > 0
   pin_memory: true
   prefetch_factor: 4  # Увеличено в 2 раза для предзагрузки
   gradient_accumulation_steps: 1  # Эффективный batch_size = 1024
