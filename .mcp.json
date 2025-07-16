@@ -2,28 +2,16 @@
   "name": "crypto_ai_trading",
   "description": "ML Crypto Trading System с архитектурой PatchTST",
   "servers": {
-    "crypto-trading-tools": {
-      "command": "python",
-      "args": ["-m", "mcp_server"],
-      "env": {
-        "PYTHONPATH": "/Users/ruslan/PycharmProjects/LLM TRANSFORM/crypto_ai_trading"
-      }
-    },
-    "project-filesystem": {
+    "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/ruslan/PycharmProjects/LLM TRANSFORM/crypto_ai_trading"],
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/mnt/SSD/PYCHARMPRODJECT/LLM TRANSFORM/crypto_ai_trading"],
       "description": "Файловая система проекта"
     },
-    "project-database": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://ruslan@localhost:5555/crypto_trading"],
-      "description": "PostgreSQL база данных проекта"
-    },
-    "project-memory": {
+    "memory": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-memory"],
       "env": {
-        "MEMORY_PERSISTENCE_PATH": "/Users/ruslan/PycharmProjects/LLM TRANSFORM/crypto_ai_trading/.mcp_memory"
+        "MEMORY_PERSISTENCE_PATH": "/mnt/SSD/PYCHARMPRODJECT/LLM TRANSFORM/crypto_ai_trading/.mcp_memory"
       },
       "description": "Персистентная память для проекта"
     }

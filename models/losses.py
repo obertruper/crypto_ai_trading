@@ -388,6 +388,11 @@ class MultiTaskLoss(nn.Module):
 def get_loss_function(loss_name: str, **kwargs) -> nn.Module:
     """Фабрика для создания функций потерь"""
     
+    # Импортируем DirectionalMultiTaskLoss локально для избежания циклических импортов
+    if loss_name == 'directional_multitask':
+        from models.patchtst_unified import DirectionalMultiTaskLoss
+        return DirectionalMultiTaskLoss(**kwargs)
+    
     loss_functions = {
         'mse': nn.MSELoss,
         'mae': nn.L1Loss,

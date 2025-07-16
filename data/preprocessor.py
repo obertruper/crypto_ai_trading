@@ -37,20 +37,25 @@ class DataPreprocessor:
         # Статистика
         self.preprocessing_stats = {}
         
-    def fit(self, data: pd.DataFrame) -> 'DataPreprocessor':
+    def fit(self, data: pd.DataFrame, exclude_targets: bool = True) -> 'DataPreprocessor':
         """
-        Обучение препроцессора на данных
+        Обучение препроцессора на данных (ТОЛЬКО на обучающей выборке!)
         
         Args:
-            data: DataFrame с данными для обучения
+            data: DataFrame с данными для обучения (ТОЛЬКО train!)
+            exclude_targets: исключить целевые переменные из нормализации
             
         Returns:
             self
         """
-        self.logger.info("Обучение препроцессора...")
+        self.logger.info("Обучение препроцессора на TRAIN данных...")
+        
+        # ВАЖНО: Проверяем что это train данные
+        if hasattr(data, 'attrs') and data.attrs.get('dataset_type') != 'train':
+            self.logger.warning("⚠️ ВНИМАНИЕ: fit() должен вызываться ТОЛЬКО на train данных!")
         
         # Определение групп признаков
-        self._identify_feature_groups(data)
+        self._identify_feature_groups(data, exclude_targets=exclude_targets)
         
         # Обучение скейлеров для каждой группы
         for group_name, features in self.feature_groups.items():
@@ -65,10 +70,19 @@ class DataPreprocessor:
                         scaler = MinMaxScaler()  # Нормализация в [0, 1]
                     elif group_name == 'returns':
                         scaler = StandardScaler()  # Стандартизация
+                    elif group_name == 'indicators':
+                        # Для индикаторов с известными диапазонами не нормализуем
+                        # RSI, Stochastic и т.д. уже в диапазоне [0, 100]
+                        continue
+                    elif group_name == 'fixed_range':
+                        # Не нормализуем индикаторы с фиксированными диапазонами
+                        # RSI [0, 100], Stochastic [0, 100], ADX [0, 100], 
+                        # CCI [-200, 200], Williams %R [-100, 0], signal_strength [0, 1]
+                        continue
                     else:
                         scaler = self._create_scaler()
                     
-                    # Обучение скейлера
+                    # Обучение скейлера ТОЛЬКО на train данных
                     clean_data = self._handle_missing_values(group_data)
                     scaler.fit(clean_data)
                     self.scalers[group_name] = scaler
@@ -159,9 +173,17 @@ class DataPreprocessor:
         
         return data_inverse
     
-    def _identify_feature_groups(self, data: pd.DataFrame):
+    def _identify_feature_groups(self, data: pd.DataFrame, exclude_targets: bool = True):
         """Определение групп признаков"""
         columns = data.columns.tolist()
+        
+        # Исключаем целевые переменные из нормализации (v4.0 - 20 целевых)
+        if exclude_targets:
+            target_keywords = ['future_', 'direction_', 'will_reach_', 'max_drawdown_', 'max_rally_',
+                             'volatility_1h', 'volatility_4h', 'volatility_12h']
+            # Удалено: 'best_action', 'signal_strength', 'risk_reward', 'optimal_hold' - больше не целевые
+            columns = [col for col in columns 
+                      if not any(keyword in col for keyword in target_keywords)]
         
         # Группы по типам данных
         self.feature_groups = {
@@ -171,7 +193,8 @@ class DataPreprocessor:
             'indicators': [col for col in columns if any(x in col.lower() for x in ['rsi', 'macd', 'ema', 'sma', 'bb_'])],
             'volatility': [col for col in columns if any(x in col.lower() for x in ['atr', 'volatility', 'std'])],
             'microstructure': [col for col in columns if any(x in col.lower() for x in ['spread', 'imbalance', 'pressure'])],
-            'temporal': [col for col in columns if any(x in col.lower() for x in ['hour', 'day', 'week', 'month'])]
+            'temporal': [col for col in columns if any(x in col.lower() for x in ['hour', 'day', 'week', 'month'])],
+            'fixed_range': [col for col in columns if any(x in col.lower() for x in ['rsi', 'stoch_k', 'stoch_d', 'adx', 'cci', 'williams_r', 'signal_strength'])]
         }
         
         # Удаление пустых групп
@@ -361,9 +384,10 @@ def create_train_val_test_split(data: pd.DataFrame,
                               train_ratio: float = 0.7,
                               val_ratio: float = 0.15,
                               test_ratio: float = 0.15,
-                              time_column: str = 'datetime') -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                              time_column: str = 'datetime',
+                              gap_days: int = 2) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Разделение данных на train/val/test с учетом времени
+    Разделение данных на train/val/test с учетом времени и временным gap
     
     Args:
         data: исходные данные
@@ -371,22 +395,50 @@ def create_train_val_test_split(data: pd.DataFrame,
         val_ratio: доля валидационной выборки
         test_ratio: доля тестовой выборки
         time_column: столбец с временем
+        gap_days: количество дней gap между выборками (для предотвращения утечек)
         
     Returns:
         Кортеж (train_data, val_data, test_data)
     """
+    logger = get_logger("DataSplit")
+    
     # Сортировка по времени
     data_sorted = data.sort_values(time_column)
     
-    n = len(data_sorted)
-    train_end = int(n * train_ratio)
-    val_end = int(n * (train_ratio + val_ratio))
+    # Преобразуем в datetime если нужно
+    if not pd.api.types.is_datetime64_any_dtype(data_sorted[time_column]):
+        data_sorted[time_column] = pd.to_datetime(data_sorted[time_column])
     
-    train_data = data_sorted.iloc[:train_end]
-    val_data = data_sorted.iloc[train_end:val_end]
-    test_data = data_sorted.iloc[val_end:]
+    # Получаем уникальные даты
+    unique_dates = data_sorted[time_column].dt.date.unique()
+    n_dates = len(unique_dates)
     
-    logger = get_logger("DataSplit")
-    logger.info(f"Разделение данных: Train={len(train_data)}, Val={len(val_data)}, Test={len(test_data)}")
+    # Рассчитываем индексы с учетом gap
+    train_end_idx = int(n_dates * train_ratio)
+    val_start_idx = min(train_end_idx + gap_days, n_dates - 1)
+    val_end_idx = min(val_start_idx + int(n_dates * val_ratio), n_dates - 1)
+    test_start_idx = min(val_end_idx + gap_days, n_dates - 1)
+    
+    # Получаем даты для разделения
+    train_end_date = unique_dates[train_end_idx]
+    val_start_date = unique_dates[val_start_idx]
+    val_end_date = unique_dates[val_end_idx]
+    test_start_date = unique_dates[test_start_idx]
+    
+    # Разделяем данные
+    train_data = data_sorted[data_sorted[time_column].dt.date <= train_end_date].copy()
+    val_data = data_sorted[(data_sorted[time_column].dt.date >= val_start_date) & 
+                          (data_sorted[time_column].dt.date <= val_end_date)].copy()
+    test_data = data_sorted[data_sorted[time_column].dt.date >= test_start_date].copy()
+    
+    # Добавляем атрибуты для отслеживания типа датасета
+    train_data.attrs['dataset_type'] = 'train'
+    val_data.attrs['dataset_type'] = 'val'
+    test_data.attrs['dataset_type'] = 'test'
+    
+    logger.info(f"📊 Разделение данных с временным gap ({gap_days} дней):")
+    logger.info(f"   - Train: {len(train_data):,} записей (до {train_end_date})")
+    logger.info(f"   - Val: {len(val_data):,} записей ({val_start_date} - {val_end_date})")
+    logger.info(f"   - Test: {len(test_data):,} записей (от {test_start_date})")
     
     return train_data, val_data, test_data

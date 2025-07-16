@@ -102,6 +102,10 @@ def create_unified_data_loaders(train_data, val_data, test_data, feature_cols, t
     logger.info("🏗️ Создание унифицированных DataLoader'ов...")
     
     from data.dataset import create_data_loaders
+    from data.precomputed_dataset import create_precomputed_data_loaders
+    
+    # Используем PrecomputedDataset для максимальной производительности
+    use_precomputed = config.get('performance', {}).get('use_precomputed_dataset', True)
     
     # Обновляем конфигурацию чтобы соответствовать реальным данным
     config_updated = config.copy()
@@ -127,14 +131,26 @@ def create_unified_data_loaders(train_data, val_data, test_data, feature_cols, t
             raise ValueError("Нет подходящей целевой переменной для регрессии")
     
     # Создание DataLoader'ов с правильными параметрами
-    train_loader, val_loader, test_loader = create_data_loaders(
-        train_data=train_data,
-        val_data=val_data, 
-        test_data=test_data,
-        config=config_updated,
-        feature_cols=feature_cols,
-        target_cols=target_cols
-    )
+    if use_precomputed:
+        logger.info("🚀 Используем PrecomputedDataset для максимальной скорости")
+        train_loader, val_loader, test_loader = create_precomputed_data_loaders(
+            train_data=train_data,
+            val_data=val_data, 
+            test_data=test_data,
+            config=config_updated,
+            feature_cols=feature_cols,
+            target_cols=target_cols
+        )
+    else:
+        logger.info("📊 Используем стандартный Dataset")
+        train_loader, val_loader, test_loader = create_data_loaders(
+            train_data=train_data,
+            val_data=val_data, 
+            test_data=test_data,
+            config=config_updated,
+            feature_cols=feature_cols,
+            target_cols=target_cols
+        )
     
     logger.info("✅ DataLoader'ы созданы успешно")
     return train_loader, val_loader, test_loader, config_updated
@@ -254,29 +270,69 @@ def train_model(config: dict, train_loader, val_loader, logger):
     from models.patchtst import create_patchtst_model
     from models.patchtst_unified import create_unified_model, UnifiedPatchTSTForTrading
     
-    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Всегда используем UnifiedPatchTST для 36 целевых переменных
-    if task_type == 'trading' and n_targets > 10:
-        logger.info(f"🎯 Обнаружено {n_targets} целевых переменных - используем UnifiedPatchTST")
-        config['model']['name'] = 'UnifiedPatchTST'
-        config['model']['output_size'] = n_targets
-        model = create_unified_model(config)
-        # ИСПРАВЛЕНО: torch.compile создает CPU worker'ы, отключаем для прямого GPU использования
-        # model = torch.compile(model, backend="inductor")
-        logger.info("✅ UnifiedPatchTST создан с 36 выходами для торговой модели")
-        logger.info("⚠️ torch.compile отключен - прямое использование GPU")
-    elif config['model']['name'] == 'UnifiedPatchTST':
-        model = create_unified_model(config)
-        # ИСПРАВЛЕНО: torch.compile создает CPU worker'ы, отключаем
-        # model = torch.compile(model, backend="inductor")
-        logger.info("📊 Используется UnifiedPatchTST с 36 выходами")
-        logger.info("⚠️ torch.compile отключен - прямое использование GPU")
+    # Ensemble обучение
+    ensemble_count = config.get('training', {}).get('ensemble_count', 1)
+    
+    if ensemble_count > 1:
+        logger.info(f"🎭 Создание ансамбля из {ensemble_count} моделей")
+        models = []
+        
+        for i in range(ensemble_count):
+            logger.info(f"📊 Создание модели {i+1}/{ensemble_count}")
+            
+            # Вариативность для каждой модели в ансамбле
+            model_config = config.copy()
+            model_config['model']['random_seed'] = config.get('model', {}).get('random_seed', 42) + i
+            
+            # Небольшие вариации архитектуры для разнообразия
+            if i > 0:
+                # Вариация dropout
+                original_dropout = model_config['model'].get('dropout', 0.1)
+                model_config['model']['dropout'] = original_dropout + (i * 0.05)
+                
+                # Вариация learning rate  
+                original_lr = model_config['model'].get('learning_rate', 2e-5)
+                model_config['model']['learning_rate'] = original_lr * (1 + (i-1) * 0.2)
+            
+            # Создание модели
+            if task_type == 'trading' and n_targets > 10:
+                model_config['model']['name'] = 'UnifiedPatchTST'
+                model_config['model']['output_size'] = n_targets
+                model = create_unified_model(model_config)
+            elif model_config['model']['name'] == 'UnifiedPatchTST':
+                model = create_unified_model(model_config)
+            else:
+                model = create_patchtst_model(model_config)
+            
+            models.append(model)
+        
+        logger.info(f"✅ Ансамбль из {len(models)} моделей создан")
+        
+        # Для простоты, обучаем первую модель (в будущем можно расширить)
+        model = models[0] 
+        logger.info(f"🎯 Обучение первой модели из ансамбля (модель 1/{ensemble_count})")
+        
     else:
-        model = create_patchtst_model(config)
-        # Логируем тип модели
-        if hasattr(model, 'long_model'):
-            logger.info("✅ Используется PatchTSTForTrading с поддержкой LONG/SHORT")
+        # Одиночная модель
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Всегда используем UnifiedPatchTST для 36 целевых переменных
+        if task_type == 'trading' and n_targets > 10:
+            logger.info(f"🎯 Обнаружено {n_targets} целевых переменных - используем UnifiedPatchTST")
+            config['model']['name'] = 'UnifiedPatchTST'
+            config['model']['output_size'] = n_targets
+            model = create_unified_model(config)
+            logger.info(f"✅ UnifiedPatchTST создан с {n_targets} выходами для торговой модели")
+            logger.info("⚠️ torch.compile отключен для RTX 5090 (sm_120) - требуется поддержка в будущих версиях PyTorch")
+        elif config['model']['name'] == 'UnifiedPatchTST':
+            model = create_unified_model(config)
+            logger.info("📊 Используется UnifiedPatchTST с 36 выходами")
+            logger.info("⚠️ torch.compile отключен для RTX 5090 (sm_120)")
         else:
-            logger.info("📊 Используется базовая PatchTSTForPrediction")
+            model = create_patchtst_model(config)
+            # Логируем тип модели
+            if hasattr(model, 'long_model'):
+                logger.info("✅ Используется PatchTSTForTrading с поддержкой LONG/SHORT")
+            else:
+                logger.info("📊 Используется базовая PatchTSTForPrediction")
     
     # ВАЖНО: Явно перемещаем модель на GPU перед созданием трейнера
     if torch.cuda.is_available():
@@ -288,9 +344,15 @@ def train_model(config: dict, train_loader, val_loader, logger):
         device = torch.device('cpu')
         logger.warning("⚠️ GPU не доступен, используется CPU")
     
-    # Создание трейнера с явным указанием устройства
-    from training.trainer import Trainer
-    trainer = Trainer(model, config, device=device)
+    # Проверяем, нужно ли использовать поэтапное обучение
+    if config.get('production', {}).get('staged_training', {}).get('enabled', False):
+        logger.info("🎯 Используется поэтапное обучение (StagedTrainer)")
+        from training.staged_trainer import StagedTrainer
+        trainer = StagedTrainer(model, config, device=device)
+    else:
+        # Создание оптимизированного трейнера с явным указанием устройства
+        from training.optimized_trainer import OptimizedTrainer
+        trainer = OptimizedTrainer(model, config, device=device)
     
     # Проверка размещения модели
     logger.info(f"✅ Модель на устройстве: {next(model.parameters()).device}")
@@ -306,7 +368,23 @@ def train_model(config: dict, train_loader, val_loader, logger):
     )
     
     # Сохранение лучшей модели
-    best_model_path = trainer.checkpoint_dir / "best_model.pth"
+    if hasattr(trainer, 'checkpoint_dir'):
+        # Для OptimizedTrainer
+        best_model_path = trainer.checkpoint_dir / "best_model.pth"
+    else:
+        # Для StagedTrainer - создаем путь вручную
+        from pathlib import Path
+        checkpoint_dir = Path(config['model'].get('checkpoint_dir', 'models_saved'))
+        checkpoint_dir.mkdir(exist_ok=True, parents=True)
+        best_model_path = checkpoint_dir / "best_model.pth"
+        
+        # Сохраняем модель
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'config': config,
+            'training_results': training_results
+        }, best_model_path)
+        logger.info(f"💾 Модель сохранена в {best_model_path}")
     
     logger.info(f"✅ Обучение завершено. Лучшая модель: {best_model_path}")
     
@@ -415,7 +493,7 @@ def main():
     parser.add_argument('--config', type=str, default='config/config.yaml',
                        help='Путь к файлу конфигурации')
     parser.add_argument('--mode', type=str, default='full',
-                       choices=['data', 'train', 'backtest', 'full', 'demo', 'interactive'],
+                       choices=['data', 'train', 'backtest', 'full', 'demo', 'interactive', 'production'],
                        help='Режим работы')
     parser.add_argument('--model-path', type=str, default=None,
                        help='Путь к сохраненной модели (для режима backtest)')
@@ -423,10 +501,43 @@ def main():
                        help='Использовать улучшенную версию модели с FeatureAttention')
     parser.add_argument('--validate-only', action='store_true',
                        help='Только валидация конфигурации без запуска')
+    parser.add_argument('--prepare-data', action='store_true',
+                       help='Автоматически запустить prepare_trading_data.py если нет кеша')
+    
+    # Новые параметры для расширенного обучения
+    parser.add_argument('--target-focus', type=str, default='all',
+                       choices=['all', 'returns', 'directions', 'long_profits', 'short_profits', 'risk_metrics'],
+                       help='Фокус на конкретной группе целевых переменных')
+    parser.add_argument('--loss-type', type=str, default='unified',
+                       choices=['unified', 'directional', 'profit_aware', 'ensemble'],
+                       help='Тип loss функции для оптимизации')
+    parser.add_argument('--ensemble-count', type=int, default=1,
+                       help='Количество моделей в ансамбле (1 = без ансамбля)')
+    parser.add_argument('--direction-focus', action='store_true',
+                       help='Специализация на предсказании направления движения цены')
+    parser.add_argument('--large-movement-weight', type=float, default=1.0,
+                       help='Коэффициент веса для крупных движений цены (1.0 = без веса)')
+    parser.add_argument('--min-movement-threshold', type=float, default=0.005,
+                       help='Минимальный порог движения для торговых сигналов (0.5%)')
+    parser.add_argument('--production', action='store_true',
+                       help='Использовать production конфигурацию (config_production.yaml)')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                       help='Путь к checkpoint для fine-tuning (например: models_saved/best_model_20250710_150018.pth)')
     
     args = parser.parse_args()
     
-    config = load_config(args.config)
+    # Автоматически используем production конфигурацию для production режима
+    if args.production or args.mode == 'production':
+        config_path = 'config/config_production.yaml'
+        logger_name = "CryptoAI-Production"
+    else:
+        config_path = args.config
+        logger_name = "CryptoAI"
+    
+    config = load_config(config_path)
+    
+    # Создаем logger сразу
+    logger = get_logger(logger_name)
     
     # Применяем флаг улучшенной модели к конфигурации
     if args.use_improved_model:
@@ -434,12 +545,49 @@ def main():
         config['model']['feature_attention'] = True
         config['model']['multi_scale_patches'] = True
     
-    logger = get_logger("CryptoAI")
+    # Обработка новых параметров обучения
+    # Создаем секцию training если её нет
+    if 'training' not in config:
+        config['training'] = {}
+    
+    if args.target_focus != 'all':
+        config['training']['target_focus'] = args.target_focus
+        logger.info(f"🎯 Фокус на целевых переменных: {args.target_focus}")
+    
+    if args.loss_type != 'unified':
+        config['training']['loss_type'] = args.loss_type
+        logger.info(f"🔧 Тип loss функции: {args.loss_type}")
+    
+    if args.ensemble_count > 1:
+        config['training']['ensemble_count'] = args.ensemble_count
+        config['model']['use_ensemble'] = True
+        logger.info(f"🎭 Ансамбль из {args.ensemble_count} моделей")
+    
+    if args.direction_focus:
+        config['training']['direction_focus'] = True
+        config['model']['task_type'] = 'direction_prediction'
+        logger.info("🎯 Специализация на предсказании направления движения")
+    
+    if args.large_movement_weight != 1.0:
+        config['training']['large_movement_weight'] = args.large_movement_weight
+        logger.info(f"⚖️ Вес крупных движений: {args.large_movement_weight}")
+    
+    if args.min_movement_threshold != 0.005:
+        config['training']['min_movement_threshold'] = args.min_movement_threshold
+        logger.info(f"📏 Минимальный порог движения: {args.min_movement_threshold:.3f} ({args.min_movement_threshold*100:.1f}%)")
     
     logger.info("="*80)
     logger.info("🚀 Запуск Crypto AI Trading System")
     logger.info(f"📋 Режим: {args.mode}")
-    logger.info(f"⚙️ Конфигурация: {args.config}")
+    logger.info(f"⚙️ Конфигурация: {config_path}")
+    if args.production or args.mode == 'production':
+        logger.info("🏭 PRODUCTION MODE - Оптимизированные настройки для финального обучения")
+        logger.info("📊 Особенности production режима:")
+        logger.info("   - Уменьшенный batch size (512) для стабильности")
+        logger.info("   - Усиленная регуляризация (dropout=0.5, weight_decay=0.01)")
+        logger.info("   - Динамические веса классов для борьбы с дисбалансом")
+        logger.info("   - Увеличенный вес direction loss (15.0)")
+        logger.info("   - Focal Loss с агрессивными параметрами")
     if args.use_improved_model:
         logger.info("🔥 Используется улучшенная модель с FeatureAttention")
     logger.info("="*80)
@@ -468,13 +616,28 @@ def main():
         train_loader, val_loader, test_loader = None, None, None
         config_updated = config.copy()
         
-        if args.mode in ['data', 'train', 'full']:
+        if args.mode in ['data', 'train', 'full', 'production']:
+            # Production режим эквивалентен train с production конфигурацией
+            if args.mode == 'production':
+                logger.info("🏭 Production режим активирован - используем оптимизированные настройки")
+                
             # Сначала проверяем наличие кэшированных данных
             train_data, val_data, test_data, feature_cols, target_cols = load_cached_data_if_exists(logger)
             
             if train_data is not None:
                 # Используем кэшированные данные
                 logger.info("🎯 Используем кэшированные данные для всех режимов")
+                
+                # Ограничиваем количество символов если указано в конфиге
+                max_symbols = config.get('data', {}).get('max_symbols', None)
+                if max_symbols:
+                    logger.info(f"🎯 Ограничиваем данные до {max_symbols} символов")
+                    unique_symbols = train_data['symbol'].unique()[:max_symbols]
+                    train_data = train_data[train_data['symbol'].isin(unique_symbols)]
+                    val_data = val_data[val_data['symbol'].isin(unique_symbols)]
+                    test_data = test_data[test_data['symbol'].isin(unique_symbols)]
+                    logger.info(f"📊 После ограничения: train={len(train_data):,}, val={len(val_data):,}, test={len(test_data):,}")
+                
                 train_loader, val_loader, test_loader, config_updated = create_unified_data_loaders(
                     train_data, val_data, test_data, feature_cols, target_cols, config, logger
                 )
@@ -486,12 +649,81 @@ def main():
             else:
                 # Режим train без кэшированных данных
                 logger.error("❌ Режим train требует наличия кэшированных данных!")
-                logger.error("Запустите сначала: python prepare_trading_data.py")
-                return
+                
+                if args.prepare_data:
+                    logger.info("🔄 Запускаем prepare_trading_data.py для создания кеша...")
+                    import subprocess
+                    result = subprocess.run(
+                        ["python", "prepare_trading_data.py", "--config", args.config],
+                        capture_output=True,
+                        text=True
+                    )
+                    
+                    if result.returncode == 0:
+                        logger.info("✅ Данные успешно подготовлены!")
+                        # Повторно пытаемся загрузить кеш
+                        train_data, val_data, test_data, feature_cols, target_cols = load_cached_data_if_exists(logger)
+                        if train_data is not None:
+                            train_loader, val_loader, test_loader, config_updated = create_unified_data_loaders(
+                                train_data, val_data, test_data, feature_cols, target_cols, config, logger
+                            )
+                        else:
+                            logger.error("❌ Не удалось загрузить данные после подготовки")
+                            return
+                    else:
+                        logger.error(f"❌ Ошибка при подготовке данных: {result.stderr}")
+                        return
+                else:
+                    logger.error("Запустите: python prepare_trading_data.py")
+                    logger.error("Или используйте флаг --prepare-data для автоматического запуска")
+                    return
         
-        if args.mode in ['train', 'full']:
-            # Обучение модели с унифицированной конфигурацией
-            model, model_path, train_loader = train_model(config_updated, train_loader, val_loader, logger)
+        if args.mode in ['train', 'full', 'production']:
+            # Проверяем, нужно ли делать fine-tuning
+            if config_updated.get('fine_tuning', {}).get('enabled', False) and args.checkpoint:
+                logger.info("🎯 Fine-tuning режим активирован")
+                from training.fine_tuner import create_fine_tuner
+                
+                # Создаем FineTuner с существующим checkpoint
+                fine_tuner = create_fine_tuner(config_updated, args.checkpoint)
+                
+                # Обновляем learning rate для fine-tuning
+                fine_tuning_lr = config_updated.get('fine_tuning', {}).get('learning_rate', 0.00002)
+                for param_group in fine_tuner.optimizer.param_groups:
+                    param_group['lr'] = fine_tuning_lr
+                
+                # Запускаем fine-tuning
+                fine_tuning_epochs = config_updated.get('fine_tuning', {}).get('epochs', 30)
+                best_val_loss = float('inf')
+                
+                for epoch in range(fine_tuning_epochs):
+                    fine_tuner.current_epoch = epoch
+                    
+                    # Train
+                    train_metrics = fine_tuner.train_epoch(train_loader)
+                    
+                    # Validate
+                    val_metrics = fine_tuner.validate(val_loader)
+                    
+                    # Scheduler step
+                    if fine_tuner.scheduler:
+                        fine_tuner.scheduler.step(val_metrics['loss'])
+                    
+                    # Save best model
+                    if val_metrics['loss'] < best_val_loss:
+                        best_val_loss = val_metrics['loss']
+                        model_path = fine_tuner.save_checkpoint(epoch, val_metrics, is_best=True)
+                    
+                    logger.info(f"Epoch {epoch+1}/{fine_tuning_epochs} - "
+                              f"Train Loss: {train_metrics['loss']:.4f}, "
+                              f"Val Loss: {val_metrics['loss']:.4f}, "
+                              f"Direction Acc: {val_metrics.get('direction_accuracy', 0):.3f}")
+                
+                model = fine_tuner.model
+                
+            else:
+                # Обычное обучение модели с унифицированной конфигурацией
+                model, model_path, train_loader = train_model(config_updated, train_loader, val_loader, logger)
         
         if args.mode in ['backtest', 'full']:
             if args.mode == 'backtest':
@@ -500,7 +732,22 @@ def main():
                     return
                 
                 logger.info(f"📥 Загрузка модели: {args.model_path}")
-                # Здесь должна быть загрузка модели
+                
+                # Загрузка модели
+                checkpoint = torch.load(args.model_path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+                
+                # Создание модели с конфигурацией
+                from models.patchtst_unified import UnifiedPatchTSTForTrading
+                model = UnifiedPatchTSTForTrading(config_updated)
+                
+                # Загрузка весов
+                if 'model_state_dict' in checkpoint:
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                else:
+                    model.load_state_dict(checkpoint)
+                
+                model.eval()
+                logger.info("✅ Модель загружена успешно")
                 
             results = backtest_strategy(config, model, test_loader, train_loader, logger)
             

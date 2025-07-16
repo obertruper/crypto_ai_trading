@@ -5,58 +5,72 @@
 # Служебные колонки (не признаки и не целевые)
 SERVICE_COLUMNS = ['id', 'symbol', 'datetime', 'timestamp', 'sector']
 
-# Основные 36 целевых переменных для торговой модели
+# Основные целевые переменные для торговой модели v4.0
+# 20 переменных без утечек данных (убраны переменные с утечками)
 TRADING_TARGET_VARIABLES = [
-    # Базовые возвраты (4)
-    'future_return_1', 'future_return_2', 'future_return_3', 'future_return_4',
+    # A. Базовые возвраты (4)
+    'future_return_15m',   # через 1 свечу (15 минут)
+    'future_return_1h',    # через 4 свечи (1 час) 
+    'future_return_4h',    # через 16 свечей (4 часа)
+    'future_return_12h',   # через 48 свечей (12 часов)
     
-    # Long позиции (15)
-    'long_tp1_hit', 'long_tp1_reached', 'long_tp1_time',
-    'long_tp2_hit', 'long_tp2_reached', 'long_tp2_time',
-    'long_tp3_hit', 'long_tp3_reached', 'long_tp3_time',
-    'long_sl_hit', 'long_sl_reached', 'long_sl_time',
-    'long_optimal_entry_time', 'long_optimal_entry_price', 'long_optimal_entry_improvement',
+    # B. Направление движения (4)
+    'direction_15m',       # UP/DOWN/FLAT
+    'direction_1h',        
+    'direction_4h',        
+    'direction_12h',       
     
-    # Short позиции (15)
-    'short_tp1_hit', 'short_tp1_reached', 'short_tp1_time',
-    'short_tp2_hit', 'short_tp2_reached', 'short_tp2_time',
-    'short_tp3_hit', 'short_tp3_reached', 'short_tp3_time',
-    'short_sl_hit', 'short_sl_reached', 'short_sl_time',
-    'short_optimal_entry_time', 'short_optimal_entry_price', 'short_optimal_entry_improvement',
+    # C. Достижение уровней прибыли LONG (4)
+    'long_will_reach_1pct_4h',   
+    'long_will_reach_2pct_4h',   
+    'long_will_reach_3pct_12h',  
+    'long_will_reach_5pct_12h',  
     
-    # Направление и целевая (2)
-    'best_direction', 'target_return_1h'
+    # D. Достижение уровней прибыли SHORT (4)
+    'short_will_reach_1pct_4h',   
+    'short_will_reach_2pct_4h',   
+    'short_will_reach_3pct_12h',  
+    'short_will_reach_5pct_12h',  
+    
+    # E. Риск-метрики (4)
+    'max_drawdown_1h',     
+    'max_rally_1h',        
+    'max_drawdown_4h',     
+    'max_rally_4h',        
+    
+    # УДАЛЕНО: best_action, signal_strength, risk_reward_ratio, optimal_hold_time
+    # Эти переменные содержали утечки данных и будут генерироваться
+    # в trading/signal_generator.py на основе предсказаний модели
 ]
 
-# Дополнительные целевые переменные (13) - для анализа, но не для обучения
+# Дополнительные целевые переменные v4.0 - legacy совместимость
 ADDITIONAL_TARGET_VARIABLES = [
-    # Будущие экстремумы (8)
-    'future_high_1', 'future_high_2', 'future_high_3', 'future_high_4',
-    'future_low_1', 'future_low_2', 'future_low_3', 'future_low_4',
-    
-    # Ожидаемые значения и результаты (4)
-    'long_expected_value', 'short_expected_value',
-    'long_final_result', 'short_final_result',
-    
-    # Сила сигнала (1)
-    'signal_strength'
+    # Legacy переменные для совместимости (создаются в feature_engineering)
+    'best_direction',  # Упрощенная версия best_action
+    'long_tp1_reached', 'long_tp2_reached', 'long_tp3_reached',
+    'short_tp1_reached', 'short_tp2_reached', 'short_tp3_reached',
+    'long_expected_value', 'short_expected_value'
 ]
 
-# Все целевые переменные (49)
-ALL_TARGET_VARIABLES = TRADING_TARGET_VARIABLES + ADDITIONAL_TARGET_VARIABLES
+# Все целевые переменные (20 основных + дополнительные legacy)
+# Убираем дубликаты через set()
+ALL_TARGET_VARIABLES = list(set(TRADING_TARGET_VARIABLES + ADDITIONAL_TARGET_VARIABLES))
 
-# Префиксы для автоматического определения целевых переменных
+# Префиксы для автоматического определения целевых переменных v4.0
 TARGET_PREFIXES = (
-    'target_', 'future_return_', 'long_tp', 'short_tp', 
-    'long_sl', 'short_sl', 'long_optimal', 'short_optimal',
-    'best_direction'
+    'future_return_',      # Базовые возвраты
+    'direction_',          # Направления движения
+    'long_will_reach_',    # LONG прибыль
+    'short_will_reach_',   # SHORT прибыль
+    'max_drawdown_',       # Риск-метрики
+    'max_rally_',          # Риск-метрики
 )
 
-# Расширенные префиксы (для поиска всех 49)
-EXTENDED_TARGET_PREFIXES = (
-    'target_', 'future_', 'long_tp', 'short_tp', 'long_sl', 'short_sl',
-    'long_optimal', 'short_optimal', 'long_expected', 'short_expected',
-    'best_direction', 'signal_strength', 'long_final', 'short_final'
+# Расширенные префиксы (включая legacy)
+EXTENDED_TARGET_PREFIXES = TARGET_PREFIXES + (
+    'best_direction',      # Legacy
+    'long_tp', 'short_tp', # Legacy
+    'long_expected', 'short_expected'  # Legacy
 )
 
 def get_feature_columns(df_columns):
@@ -71,7 +85,7 @@ def get_target_columns(df_columns, use_extended=False):
         # Возвращает все 49 переменных
         return [col for col in df_columns if col in ALL_TARGET_VARIABLES]
     else:
-        # Возвращает только основные 36 для обучения
+        # Возвращает только основные 20 для обучения
         return [col for col in df_columns if col in TRADING_TARGET_VARIABLES]
 
 def validate_data_structure(df):

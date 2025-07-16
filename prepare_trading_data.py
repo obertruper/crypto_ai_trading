@@ -27,7 +27,7 @@ from utils.logger import get_logger
 from tqdm import tqdm
 
 # ВАЖНО: Увеличивать при изменении логики создания признаков
-FEATURE_VERSION = "2.6"  # Исправлены: trend_1h/4h нормализованы, улучшена проверка данных
+FEATURE_VERSION = "4.1"  # Обновленная версия БЕЗ УТЕЧЕК ДАННЫХ - 20 целевых переменных
 
 
 def check_database_connection(config: dict, logger):
@@ -109,6 +109,11 @@ def process_symbol_features(symbol: str, symbol_data: pd.DataFrame, config: dict
         logger.error(f"❌ Ошибка при обработке {symbol}: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
+        # Сохраняем подробную информацию об ошибке
+        with open(f'/tmp/{symbol}_error.log', 'w') as f:
+            f.write(f"Error processing {symbol}:\n")
+            f.write(f"Error: {str(e)}\n\n")
+            f.write(f"Traceback:\n{traceback.format_exc()}\n")
         return pd.DataFrame()
 
 
@@ -247,6 +252,16 @@ def prepare_features_for_trading(config: dict, logger, force_recreate: bool = Fa
     logger.info("\n📊 Объединение результатов...")
     processed_data = pd.concat(featured_dfs, ignore_index=True)
     
+    # ИСПРАВЛЕНО: Удаляем дубликаты после параллельной обработки
+    initial_count = len(processed_data)
+    processed_data = processed_data.drop_duplicates(subset=['datetime', 'symbol'], keep='first')
+    duplicates_removed = initial_count - len(processed_data)
+    
+    if duplicates_removed > 0:
+        logger.warning(f"⚠️ Удалено {duplicates_removed} дубликатов по (datetime, symbol)")
+    else:
+        logger.info("✅ Дубликаты не обнаружены")
+    
     elapsed_time = time.time() - start_time
     logger.info(f"⏱️ Обработка заняла {elapsed_time:.1f} секунд")
     
@@ -258,40 +273,40 @@ def prepare_features_for_trading(config: dict, logger, force_recreate: bool = Fa
     logger.info("🔄 Создание cross-asset признаков...")
     processed_data = feature_engineer._create_cross_asset_features(processed_data)
     
-    # Разделение на train/val/test
-    logger.info("📊 Разделение на выборки...")
+    # Разделение на train/val/test с временным gap
+    logger.info("📊 Разделение на выборки с временным gap...")
     
-    # Сортируем по времени
-    processed_data = processed_data.sort_values('datetime')
+    # Используем функцию из preprocessor с gap
+    from data.preprocessor import create_train_val_test_split
     
-    # Определяем индексы для разделения
-    n_samples = len(processed_data)
-    train_end_idx = int(n_samples * config['data']['train_ratio'])
-    val_end_idx = train_end_idx + int(n_samples * config['data']['val_ratio'])
-    
-    train_data = processed_data.iloc[:train_end_idx].copy()
-    val_data = processed_data.iloc[train_end_idx:val_end_idx].copy()
-    test_data = processed_data.iloc[val_end_idx:].copy()
-    
-    # ИСПРАВЛЕНО: Добавляем нормализацию данных перед сохранением
-    # Нормализация будет применяться в dataset.py при загрузке
-    logger.info("📏 Настройка нормализации данных...")
-    
-    # Импортируем необходимые модули для нормализации
-    from data.dataset import TimeSeriesDataset
-    
-    # Создаем временный датасет для обучения scaler
-    temp_dataset = TimeSeriesDataset(
-        data=train_data,
-        context_window=config['model']['context_window'],
-        prediction_window=config['model']['target_window'],
-        stride=config['model']['stride'],
-        normalize=True,
-        scaler_path='models_saved/data_scaler.pkl',
-        fit_scaler=True  # Обучаем scaler на train данных
+    train_data, val_data, test_data = create_train_val_test_split(
+        processed_data,
+        train_ratio=config['data']['train_ratio'],
+        val_ratio=config['data']['val_ratio'],
+        test_ratio=config['data']['test_ratio'],
+        time_column='datetime',
+        gap_days=2  # 2 дня gap между выборками для предотвращения утечек
     )
     
-    logger.info("✅ Scaler обучен и сохранен в models_saved/data_scaler.pkl")
+    # ИСПРАВЛЕНО: Обучаем препроцессор ТОЛЬКО на train данных
+    logger.info("📏 Настройка препроцессора (нормализация ТОЛЬКО на train)...")
+    
+    # Импортируем препроцессор
+    from data.preprocessor import DataPreprocessor
+    import pickle
+    
+    # Создаем и обучаем препроцессор ТОЛЬКО на train данных
+    preprocessor = DataPreprocessor(config)
+    preprocessor.fit(train_data, exclude_targets=True)  # Исключаем целевые из нормализации
+    
+    # Сохраняем препроцессор
+    preprocessor_path = Path('models_saved/preprocessor_v4.pkl')
+    preprocessor_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(preprocessor_path, 'wb') as f:
+        pickle.dump(preprocessor, f)
+    
+    logger.info(f"✅ Препроцессор обучен на TRAIN и сохранен в {preprocessor_path}")
     
     # Статистика по данным
     logger.info("\n📊 СТАТИСТИКА ПОДГОТОВЛЕННЫХ ДАННЫХ:")
@@ -315,6 +330,33 @@ def prepare_features_for_trading(config: dict, logger, force_recreate: bool = Fa
     test_data.to_parquet(test_path, compression='snappy')
     
     logger.info(f"✅ Данные сохранены в {data_dir}")
+    
+    # ВАЖНО: Проверка на утечки данных
+    logger.info("\n🔍 Проверка на утечки данных...")
+    
+    # Проверяем что нет future колонок в признаках
+    feature_cols = [col for col in train_data.columns 
+                   if col not in ['datetime', 'symbol'] and not any(
+                       keyword in col for keyword in [
+                           'future_', 'direction_', 'will_reach_', 'max_drawdown_', 'max_rally_',
+                           'long_tp', 'short_tp', 'long_sl', 'short_sl',
+                           '_reached', '_hit', '_time', 'expected_value', 'best_direction',
+                           'target_return', 'long_optimal_entry', 'short_optimal_entry'
+                       ]
+                   )]
+    # Удалено: 'best_action', 'risk_reward', 'optimal_hold' - больше не целевые
+    # signal_strength теперь признак (не целевая)
+    
+    # Более точная проверка на подозрительные колонки
+    # optimal_leverage и safe_leverage - это рекомендации на основе исторической волатильности, не утечка
+    suspicious_cols = [col for col in feature_cols 
+                      if any(word in col.lower() for word in ['future', 'target']) and 
+                      col not in ['optimal_leverage', 'safe_leverage']]
+    
+    if suspicious_cols:
+        logger.warning(f"⚠️ Найдены подозрительные колонки: {suspicious_cols}")
+    else:
+        logger.info("✅ Утечек данных не обнаружено!")
     
     return {
         'train_data': train_data,

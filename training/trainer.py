@@ -148,7 +148,11 @@ class Trainer:
         loss_name = loss_config.get('name', 'mse')
         
         # Проверяем тип loss функции
-        if loss_name == 'unified_trading':
+        if loss_name == 'directional_multitask':
+            from models.patchtst_unified import DirectionalMultiTaskLoss
+            self.logger.info("🎯 Используется DirectionalMultiTaskLoss для улучшения direction prediction")
+            return DirectionalMultiTaskLoss(self.config)
+        elif loss_name == 'unified_trading':
             from models.patchtst_unified import UnifiedTradingLoss
             return UnifiedTradingLoss(self.config)
         elif 'trading' in loss_name:
@@ -157,11 +161,11 @@ class Trainer:
         
         # Проверяем если используется унифицированная модель
         model_name = self.config.get('model', {}).get('name', '')
-        if model_name == 'UnifiedPatchTST' and loss_name != 'unified_trading':
-            # Автоматически используем UnifiedTradingLoss для UnifiedPatchTST
-            self.logger.info("🔧 Автоматически используется UnifiedTradingLoss для UnifiedPatchTST")
-            from models.patchtst_unified import UnifiedTradingLoss
-            return UnifiedTradingLoss(self.config)
+        if model_name == 'UnifiedPatchTST':
+            # Автоматически используем DirectionalMultiTaskLoss для UnifiedPatchTST
+            self.logger.info("🔧 Автоматически используется DirectionalMultiTaskLoss для UnifiedPatchTST")
+            from models.patchtst_unified import DirectionalMultiTaskLoss
+            return DirectionalMultiTaskLoss(self.config)
         
         # Многозадачная потеря для торговой модели
         elif loss_config.get('multitask', False):
@@ -587,23 +591,22 @@ class Trainer:
             else:
                 self.patience_counter += 1
                 
-                # Проверка на переобучение с "прогревом"
-                # Не проверяем переобучение первые 3 эпохи - даем модели стабилизироваться
-                if epoch >= 3:  # Начинаем проверку только после 3-й эпохи
+                # МЯГКАЯ проверка на переобучение - даем модели больше свободы
+                if epoch >= 5:  # Начинаем проверку только с 5-й эпохи
                     if overfitting_ratio > (1.0 + self.overfitting_threshold):
                         self.consecutive_overfitting += 1
-                        self.logger.warning(f"⚠️  Обнаружено переобучение! Train: {train_metrics['loss']:.4f}, Val: {val_metrics['loss']:.4f} (ratio: {overfitting_ratio:.3f})")
+                        self.logger.warning(f"⚠️ Переобучение обнаружено: Train: {train_metrics['loss']:.4f}, Val: {val_metrics['loss']:.4f} (ratio: {overfitting_ratio:.3f})")
                         
-                        # Останавливаемся только после 3 последовательных обнаружений
-                        if self.consecutive_overfitting >= 3:
-                            self.logger.info(f"🛑 Остановка из-за устойчивого переобучения (3 эпохи подряд)")
+                        # Останавливаемся только после 5 последовательных обнаружений (вместо 2)
+                        if self.consecutive_overfitting >= 5:
+                            self.logger.info(f"🛑 Остановка из-за устойчивого переобучения (5 эпох подряд)")
                             break
                     else:
                         self.consecutive_overfitting = 0
                 else:
-                    # Первые 3 эпохи - только информационное сообщение
+                    # Первые 5 эпох - только информационное сообщение
                     if overfitting_ratio > 1.5:  # 50% разница
-                        self.logger.info(f"📈 Эпоха {epoch + 1}: высокий val_loss относительно train_loss (ratio: {overfitting_ratio:.3f}), но это нормально в начале обучения")
+                        self.logger.info(f"📈 Эпоха {epoch + 1}: val_loss выше train_loss (ratio: {overfitting_ratio:.3f}) - нормально в начале")
             
             # КРИТИЧНО: Дополнительная проверка - если val_loss не улучшается слишком долго
             if self.patience_counter >= self.early_stopping_patience:

@@ -12,6 +12,7 @@ import warnings
 warnings.filterwarnings('ignore')
 from sklearn.preprocessing import RobustScaler
 import pickle
+from tqdm import tqdm
 
 from utils.logger import get_logger
 from data.constants import TRADING_TARGET_VARIABLES, SERVICE_COLUMNS, get_feature_columns
@@ -45,6 +46,14 @@ class TimeSeriesDataset(Dataset):
         self.target_window = prediction_window  # Добавляем target_window для совместимости
         self.stride = stride
         
+        # Категориальные переменные v4.0 и их маппинг
+        self.categorical_targets = {
+            'direction_15m': {'UP': 0, 'DOWN': 1, 'FLAT': 2},
+            'direction_1h': {'UP': 0, 'DOWN': 1, 'FLAT': 2},
+            'direction_4h': {'UP': 0, 'DOWN': 1, 'FLAT': 2},
+            'direction_12h': {'UP': 0, 'DOWN': 1, 'FLAT': 2}
+        }
+        
         # Определение признаков и целевых переменных
         if feature_cols is None:
             self.feature_cols = [col for col in data.columns 
@@ -54,11 +63,11 @@ class TimeSeriesDataset(Dataset):
             self.feature_cols = feature_cols
             
         if target_cols is None:
-            # Обновленный список целевых переменных для торговой модели
+            # Обновленный список целевых переменных для торговой модели v4.0 (20 переменных)
             self.target_cols = [col for col in data.columns 
-                              if col.startswith(('target_', 'future_return_', 'long_tp', 'short_tp', 
-                                               'long_sl', 'short_sl', 'long_optimal', 'short_optimal',
-                                               'best_direction'))]
+                              if col.startswith(('future_return_', 'direction_', 
+                                               'long_will_reach_', 'short_will_reach_',
+                                               'max_drawdown_', 'max_rally_'))]
         else:
             self.target_cols = target_cols
         
@@ -83,24 +92,36 @@ class TimeSeriesDataset(Dataset):
         """Создание индексов для валидных окон"""
         self.indices = []
         
-        # Группировка по символам
-        for symbol in self.data['symbol'].unique():
+        # Получаем уникальные символы
+        symbols = self.data['symbol'].unique()
+        self.logger.info(f"🔄 Создание индексов для {len(symbols)} символов...")
+        
+        # Группировка по символам с прогресс-баром
+        for symbol in tqdm(symbols, desc="Создание окон", leave=False):
             symbol_data = self.data[self.data['symbol'] == symbol]
             symbol_indices = symbol_data.index.tolist()
             
             # Создание окон с учетом stride
+            window_count = 0
             for i in range(0, len(symbol_indices) - self.context_window - self.prediction_window + 1, self.stride):
-                # Проверка непрерывности временного ряда
-                window_indices = symbol_indices[i:i + self.context_window + self.prediction_window]
+                # Проверка непрерывности временного ряда (оптимизированная)
+                start_idx = i
+                end_idx = i + self.context_window + self.prediction_window
                 
-                # Проверяем, что все индексы последовательны
-                if all(window_indices[j+1] - window_indices[j] == 1 for j in range(len(window_indices)-1)):
+                # Быстрая проверка последовательности через разность первого и последнего индекса
+                if symbol_indices[end_idx - 1] - symbol_indices[start_idx] == end_idx - start_idx - 1:
                     self.indices.append({
                         'symbol': symbol,
-                        'start_idx': window_indices[0],
-                        'context_end_idx': window_indices[self.context_window - 1],
-                        'target_end_idx': window_indices[-1]
+                        'start_idx': symbol_indices[start_idx],
+                        'context_end_idx': symbol_indices[start_idx + self.context_window - 1],
+                        'target_end_idx': symbol_indices[end_idx - 1]
                     })
+                    window_count += 1
+            
+            if window_count > 0:
+                self.logger.debug(f"  {symbol}: создано {window_count} окон")
+        
+        self.logger.info(f"✅ Создано {len(self.indices)} окон с stride={self.stride}")
     
     def _setup_normalization(self, scaler_path: Optional[str] = None, fit_scaler: bool = False):
         """Настройка нормализации данных"""
@@ -189,7 +210,7 @@ class TimeSeriesDataset(Dataset):
         # Преобразование в тензоры с обработкой object типов
         feature_data = context_data[self.feature_cols]
         
-        # ИСПРАВЛЕНИЕ: Надёжная конвертация в числовые типы
+        # ПОЛНАЯ версия: надёжная конвертация в числовые типы
         feature_data = feature_data.copy()
         
         # Применяем pd.to_numeric ко всем колонкам для надёжности
@@ -274,8 +295,21 @@ class TimeSeriesDataset(Dataset):
                     else:
                         y_values.append(float(value))
                 else:
-                    # Обычные числовые переменные
-                    y_values.append(float(value))
+                    # Проверяем, является ли это категориальной переменной v4.0
+                    if col in self.categorical_targets:
+                        # Преобразуем категориальное значение в числовое
+                        mapping = self.categorical_targets[col]
+                        # Безопасное преобразование с дефолтным значением
+                        numeric_value = mapping.get(str(value), 2)  # 2 = FLAT/HOLD по умолчанию
+                        y_values.append(float(numeric_value))
+                    else:
+                        # Обычные числовые переменные
+                        try:
+                            y_values.append(float(value))
+                        except (ValueError, TypeError):
+                            # Если не удается преобразовать, используем 0
+                            self.logger.warning(f"Не удалось преобразовать значение '{value}' для колонки '{col}', используем 0")
+                            y_values.append(0.0)
             
             y_values = np.array(y_values, dtype=np.float32)
             
@@ -676,6 +710,22 @@ def create_data_loaders(train_data: pd.DataFrame,
     normalize = config.get('data', {}).get('normalize', True)
     scaler_path = config.get('data', {}).get('scaler_path', 'models_saved/data_scaler.pkl')
     
+    # Получаем параметры DataLoader из конфига
+    pin_memory = config['performance'].get('dataloader_pin_memory', True)
+    drop_last = config['performance'].get('dataloader_drop_last', True)
+    
+    # Получаем параметры stride из конфига
+    train_stride = config.get('data', {}).get('train_stride', 8)  # Увеличен для ускорения
+    val_stride = config.get('data', {}).get('val_stride', 16)    # Еще больше для валидации
+    
+    # Проверка наличия scaler для решения о необходимости обучения
+    from pathlib import Path
+    scaler_exists = Path(scaler_path).exists()
+    if scaler_exists:
+        logger.info(f"✅ Найден существующий scaler: {scaler_path}")
+    else:
+        logger.info(f"⚠️ Scaler не найден, будет создан новый: {scaler_path}")
+    
     # Создание датасетов с проверкой ошибок
     try:
         train_dataset = TradingDataset(
@@ -685,10 +735,10 @@ def create_data_loaders(train_data: pd.DataFrame,
             prediction_window=pred_window,
             feature_cols=feature_cols,
             target_cols=target_cols,
-            stride=1,  # Для обучения используем все возможные окна
+            stride=train_stride,  # Используем stride из конфига для ускорения
             normalize=normalize,
             scaler_path=scaler_path,
-            fit_scaler=True  # Обучаем scaler на train данных
+            fit_scaler=not scaler_exists  # Обучаем scaler только если его нет
         )
         
         val_dataset = TradingDataset(
@@ -698,7 +748,7 @@ def create_data_loaders(train_data: pd.DataFrame,
             prediction_window=pred_window,
             feature_cols=feature_cols,
             target_cols=target_cols,
-            stride=4,  # Для валидации можем использовать больший stride
+            stride=val_stride,  # Используем stride из конфига
             normalize=normalize,
             scaler_path=scaler_path,
             fit_scaler=False  # Используем уже обученный scaler
@@ -725,14 +775,14 @@ def create_data_loaders(train_data: pd.DataFrame,
     logger.info(f"   - Val: {len(val_dataset):,} окон (из {len(val_data):,} записей, stride={val_dataset.stride})")
     logger.info(f"   - Test: {len(test_dataset):,} окон (из {len(test_data):,} записей, stride={test_dataset.stride})")
     
-    # Создание DataLoader'ов
+    # Создание DataLoader'ов с оптимизацией для GPU
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True,
+        pin_memory=pin_memory,
+        drop_last=drop_last,
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
@@ -742,7 +792,8 @@ def create_data_loaders(train_data: pd.DataFrame,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
+        drop_last=drop_last,  # Также включаем для валидации для стабильности
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
@@ -752,7 +803,8 @@ def create_data_loaders(train_data: pd.DataFrame,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
+        drop_last=False,  # Для теста оставляем все данные
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
