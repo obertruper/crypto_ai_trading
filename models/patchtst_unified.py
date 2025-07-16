@@ -318,10 +318,10 @@ class UnifiedPatchTSTForTrading(nn.Module):
                                     bias[:, 1] = 0.5    # SHORT bias (умеренное увеличение)  
                                     bias[:, 2] = -0.5   # FLAT bias (умеренное подавление)
                                 elif init_method == 'proportional':
-                                    # Инициализация пропорционально истинному распределению
-                                    bias[:, 0] = np.log(0.377 / 0.254)  # log(P(LONG)/P(FLAT))
-                                    bias[:, 1] = np.log(0.370 / 0.254)  # log(P(SHORT)/P(FLAT))
-                                    bias[:, 2] = 0.0
+                                    # НУЛЕВАЯ инициализация - модель сама научится
+                                    bias[:, 0] = 0.0  # LONG
+                                    bias[:, 1] = 0.0  # SHORT
+                                    bias[:, 2] = 0.0  # FLAT
                         elif module.bias is not None:
                             nn.init.constant_(module.bias, 0)
                     else:
@@ -864,8 +864,7 @@ class DirectionalMultiTaskLoss(nn.Module):
             self.class_weights = self.class_weights.to(targets.device)
             self.class_weights = (1 - weight_update_rate) * self.class_weights + weight_update_rate * new_weights
             
-            # Обновляем веса в loss функции - пересоздаем объект с новыми весами
-            self.cross_entropy_loss = nn.CrossEntropyLoss(weight=self.class_weights, reduction='none')
+            # НЕ обновляем cross_entropy_loss здесь - будем использовать веса напрямую в focal_loss
         
     def get_dynamic_direction_weight(self) -> float:
         """Получение динамического веса для direction loss с warmup"""
@@ -929,8 +928,8 @@ class DirectionalMultiTaskLoss(nn.Module):
             target_weights = class_weights[targets]
             ce_loss = ce_loss * target_weights
         else:
-            # Обычный weighted cross entropy
-            ce_loss = F.cross_entropy(logits, targets, weight=class_weights, reduction='none')
+            # Обычный weighted cross entropy - используем актуальные веса
+            ce_loss = F.cross_entropy(logits, targets, weight=self.class_weights.to(device), reduction='none')
         
         # Focal loss модификация
         pt = torch.exp(-ce_loss)

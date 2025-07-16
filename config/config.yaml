@@ -166,7 +166,7 @@ loss:
     risk_metrics: 0.4        # Для drawdown/rally
   
   # КРИТИЧНО для борьбы со схлопыванием в FLAT
-  class_weights: [2.0, 2.0, 0.3]  # [LONG, SHORT, FLAT] - еще сильнее подавляем FLAT
+  class_weights: [1.3, 1.3, 0.7]  # [LONG, SHORT, FLAT] - сбалансированные веса
   use_weighted_sampling: false  # ОТКЛЮЧЕНО - убираем дублирование примеров
   # Динамическая балансировка на основе энтропии батча
   adaptive_class_weights: true
@@ -197,9 +197,9 @@ model:
   context_window: 96  # 24 часа истории (96 * 15 минут) - используем существующий кэш
   d_ff: 512  # УМЕНЬШЕН для предотвращения переобучения
   d_model: 256  # УМЕНЬШЕН для предотвращения переобучения
-  dropout: 0.6  # УВЕЛИЧЕН для сильной регуляризации
-  attention_dropout: 0.25  # УВЕЛИЧЕН для attention слоев
-  weight_decay: 0.05  # УВЕЛИЧЕНА L2 регуляризация
+  dropout: 0.3  # ОПТИМАЛЬНЫЙ для нормального обучения
+  attention_dropout: 0.1  # СТАНДАРТНЫЙ для attention слоев
+  weight_decay: 0.01  # СТАНДАРТНАЯ L2 регуляризация
   e_layers: 3  # Оптимальное количество слоев
   early_stopping_patience: 10  # УМЕНЬШЕНА терпимость для строгого контроля переобучения
   epochs: 100  # Максимум эпох для полного обучения
@@ -211,7 +211,7 @@ model:
   n_heads: 8  # Увеличено для лучшей параллелизации на GPU
   name: UnifiedPatchTST  # ИЗМЕНЕНО на унифицированную модель
   output_size: 20  # Фактическое количество целевых переменных в кэше
-  overfitting_threshold: 0.25  # СМЯГЧЕН - даем модели больше свободы в начале
+  overfitting_threshold: 0.3  # СМЯГЧЕН - даем модели больше свободы в начале
   patch_len: 16  # Увеличен размер патча
   use_amp: true      # Mixed Precision для RTX 5090
   amp_dtype: float16  # FP16 для совместимости с sm_120
@@ -266,7 +266,7 @@ model:
   weight_noise: 0.0     # ОТКЛЮЧЕНО
   temperature_scaling: true  # Калибровка уверенности через температуру
   temperature: 2.0  # Увеличенная температура для снижения уверенности в FLAT
-  confidence_threshold: 0.0  # ОТКЛЮЧЕНО - позволяем модели свободно предсказывать
+  confidence_threshold: 0.25  # НИЗКИЙ порог для свободного предсказания
   dropout_schedule: false    # ОТКЛЮЧЕНО динамическое уменьшение dropout
   
   # Entropy regularization для предотвращения схлопывания
@@ -366,14 +366,14 @@ risk_management:
 scheduler:
   name: OneCycleLR  # ИЗМЕНЕНО для динамического LR
   params:
-    max_lr: 0.001     # УМЕНЬШЕН максимальный LR для стабильности
+    max_lr: 0.0003     # УМЕНЬШЕН максимальный LR для стабильности
     pct_start: 0.3   # 30% времени на разгон
     anneal_strategy: cos  # Косинусное затухание
     cycle_momentum: true
     base_momentum: 0.85
     max_momentum: 0.95
-    div_factor: 25      # Начальный LR = max_lr / 25 = 0.00004
-    final_div_factor: 10000  # Финальный LR = max_lr / 10000 = 0.0000001
+    div_factor: 25      # Начальный LR = max_lr / 25 = 0.000012
+    final_div_factor: 10000  # Финальный LR = max_lr / 10000 = 0.00000003
 trading:
   max_daily_trades: 15
   max_positions: 5
