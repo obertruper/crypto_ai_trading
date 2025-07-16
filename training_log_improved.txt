@@ -1,5 +1,0 @@
-usage: main.py [-h] [--config CONFIG]
-               [--mode {data,train,backtest,full,demo,interactive}]
-               [--model-path MODEL_PATH] [--use-improved-model]
-               [--validate-only] [--prepare-data]
-main.py: error: unrecognized arguments: --test

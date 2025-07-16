@@ -78,7 +78,7 @@ data:
   val_ratio: 0.2
   train_stride: 2   # УМЕНЬШЕН для меньшего переобучения
   val_stride: 2     # ОДИНАКОВЫЙ с train для согласованности распределений
-  # max_symbols: 50   # Закомментировано - использовать все символы
+  max_symbols: 10   # ВРЕМЕННО: для быстрого теста исправлений
   walk_forward:
     step_size: 7
     test_window: 30
